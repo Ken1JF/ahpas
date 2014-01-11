@@ -1,0 +1,79 @@
+{	AbstHier	Abstraction Hierarchies
+
+DESCRIPTION
+	Implementation of "Abstraction Hierarchies" updating algorithms
+	as defined in "Abstraction Hierarchies: A Model of Perception and 
+	Cognition in the Game of GO", Ph.D. dissertation, U.C. Santa Cruz, 1980.
+
+AUTHOR
+	Ken Friedenbach
+	Copyright 1980-1988
+
+BUGS
+}
+
+{$I Flags.p} {Global options for compilations}
+
+UNIT AbstHier;
+
+INTERFACE
+
+uses 
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	GraphOps, BoardOps, Utilities;
+
+type
+	TAbstHierNode = 
+		record
+			case Boolean of
+				true:  (PtRec:  p2GOPoint);
+				false: (GphRec: p2Node)
+		end;
+
+var
+	AbstIndent: integer;
+{$IFC TraceAbst}
+	gTraceUpdate:  BOOLEAN; { controls debug tracing of Update of Abst Hier}
+{$ELSEC}
+const
+	gTraceUpdate = FALSE;
+{$ENDC}
+	
+	{ Operators to change "high" graph }
+
+function AddNodeHigh (pDoc: p2DocInfo; g: p2Graph; nod: TAbstHierNode): Boolean;
+	{ add the image of a node to the HighGraph. }
+	{ Returns true if a new node was created, }
+	{ i.e. needs to be "re-computed" after arcs added. }
+		
+procedure AddArcHigh (pDoc: p2DocInfo; g: p2Graph; chgNod, adjNod: p2Node); 
+
+procedure CheckMerge (pDoc: p2DocInfo; g: p2Graph; nod1, nod2: p2Node);
+
+	{ Operators to change "low" graph }
+	
+function AddNodeLow (pDoc: p2DocInfo; g: p2Graph; loState: integer; var NewNode: Boolean): p2Node;
+
+procedure DelNodLow (pDoc: p2DocInfo; g: p2Graph; nod: TAbstHierNode);
+
+function AddArcLow (pDoc: p2DocInfo; g: p2Graph; chgNode, adjNode: p2Node): p2Arc;
+
+procedure DelArcLow (pDoc: p2DocInfo; g: p2Graph; chgNode, adjNode: p2Node);
+
+procedure ChangeState (pDoc: p2DocInfo; g: p2Graph; chgNode: TAbstHierNode; 
+		newS: integer; doMergeSplit: Boolean);
+		
+procedure RequestChanges (pDoc: p2DocInfo; g: p2Graph; pt: p2GOPoint; Str1: p2Node);
+	{ Call this after a call to one or more "low" graph operators }
+	{ Marks points for checking of higher objects }
+
+procedure CheckChanges (pDoc: p2DocInfo; upGraph: p2Graph);
+	{ Call this after a call to one or more "low" graph operators }
+	{ Removes marks and makes necessary changes }
+
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I AbstHier2.p }
+END. {AbstHier}

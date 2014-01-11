@@ -1,0 +1,1942 @@
+{$S StringKill }
+{4/1  Trying to keep lists of p2GoPoints, rather than p2GOStrings.
+       StringKill only, to start with.
+	   This works well.  Do it for SaveString, also
+ 4/27 Done for SaveString.}
+ {4/27  Re-doing AtariEscape to call RunFromLadder.}
+ {5/15	Redefine "snapback": do not include capturing more than opponent will 
+ 		take. kjf}
+ {5/16	Allow "race to capture" with two liberties, if <= defender liberties. kjf}
+ {6/23 pass -- TryMakeMove(gH, atPoint, tellUser, nil, true);  }
+{Note that SuccessfulMove is only defined if the path is successful--the string 
+	escapes, for SaveString, or does not, for KillString.}
+
+{ xxxx 7/31/1988 Problem : For NearLife, I want one stone in a 4-in-a-row eyespace to be
+	marked dead.  However, the status is really CanKillCanFormSeki, which comes out as
+	CanKillCanLive currently (assuming the string is surrounded on the outside). 
+Solution : Allow KillString to Pass early in the search.
+Also : Force SaveString to move if KillString passes. }
+{ The above is not implemented yet. }
+
+{$IFC TraceStringKill}
+const
+	TraceStringAnalysis = true;
+{$ELSEC}
+const
+	TraceStringAnalysis = false;
+{$ENDC}
+
+TraceValidate = false;
+
+TraceAnalysisLimits = true;
+
+procedure SweepDuplicates (g : p2Graph; var List : p2ListItem);
+var
+	RestOfItems, Previous, ItemChecked : p2ListItem;
+	
+begin
+	if List <> nil then
+		begin
+			ItemChecked := List;
+			while ItemChecked <> nil do
+				begin
+					RestOfItems := ItemChecked^.NextListItem;
+					Previous := ItemChecked;
+					while RestOfItems <> nil do
+						begin
+							if RestOfItems^.ListItem = ItemChecked^.ListItem then
+								begin
+									Previous^.NextListItem := RestOfItems^.NextListItem;
+									RestOfItems^.NextListItem := nil;
+									if Pop (g, RestOfItems) <> ItemChecked^.ListItem then
+										GOEngineError ('Swept Unique Element', 0, 0);
+									RestOfItems := Previous^.NextListItem;
+								end
+							else
+								begin
+									Previous := RestOfItems;
+									RestOfItems := RestOfItems^.NextListItem;
+								end;
+						end;
+					ItemChecked := ItemChecked^.NextListItem;
+				end;
+		end;
+end; {SweepDuplicates}
+
+procedure SetCycleLimit (targPt: p2GOPoint);
+	{ xxx temporary, until status of parameters and global variables is straightened out.}
+	{ SetCycleLimit sets a limit on endless cycles of captures during analysis. }
+	{ CycleLimit needs to be high enough to allow "expected captures" }
+	{ and low enough to not cost loss of game on time factors. }
+	
+	procedure AddExpectedCaptures (Str2: p2Node);
+		begin
+			case p2GOPoint(Str2^.Child)^.OccStatus of
+				BlackOcc, WhiteOcc:
+					if NumLiberties (Str2) <= DameToSave then
+						CycleLimit := CycleLimit + NumElements (Str2);
+			end;
+		end; {AddExpectedCaptures}
+		
+	begin {SetCycleLimit}
+		CycleLimit := NumElements (targPt^.PtNode);
+		EachAdjNode (targPt^.PtNode, AddExpectedCaptures);
+		{ Question: how many to allow for a complex sequences of KO's, throw-ins, etc.? }
+		CycleLimit := 2*CycleLimit + DameToSave;
+		{$IFC TraceStringKill}
+		if TraceAnalysisLimits then
+			begin
+				writeln('Setting Cycle Limit: ', CycleLimit:1);
+			end;
+		{$ENDC}
+	end; {SetCycleLimit}
+
+var  
+	{ variables used to impose absolute limit on length of search! }
+	CountNodes: integer; LimitNodes: integer;
+	
+	{ variable used to control marking of analysis for invalidation }
+	DoMarkInvalid: Boolean; 
+		{ true if doing analysis to be "remembered" }
+		{ false for "temporary" analysis }
+
+procedure AddToInvalidList (pDoc: p2DocInfo; g: p2Graph; 
+		DefendStrPt, ChangePt : p2GoPoint);
+{	A move at ChangePt will invalidate the analysis at DefendStrPt.
+	Adds DefendStrPt to the InValidateAnalysis lists of ChangePt and 
+	all its neighbours, but only if it is not already on them. }
+		
+	procedure AddToInval (pDoc : p2DocInfo; AdjPt : p2GoPoint);
+		var
+			tempList : p2ListItem;
+		begin
+			tempList := AdjPt^.AnalysisInvalidated;
+			while tempList <> nil do
+				with tempList^ do
+					begin
+						if ListItem <> nil then
+							if p2GoPoint(ListItem)^.PtNode = DefendStrPt^.PtNode then
+									{If the points are on the same string then quit.}
+								exit (AddToInval);
+						tempList := NextListItem;
+					end;
+					
+			Push (g, AdjPt^.AnalysisInvalidated, p2Node(DefendStrPt) );
+			{$IFC TraceAnalysisResults}
+			write(' A move at ');
+			PrintPointItem ( p2Node(adjPt) );
+			write (' Will invalidate analysis at ');
+			PrintPointItem (p2Node(DefendStrPt));
+			writeln;
+			{$ENDC}
+		end; {AddToInval}
+		
+	begin {AddToInvalidList}
+		if (ChangePt <> nil) and (DefendStrPt <> nil) then { xxx ignore passes ?? }
+		{ NOTE: a pass can invalidate an analyis, by changing the Ko status. }
+		{ xxx for now, this is part of "not knowing how to play Ko" }
+			begin
+				AddToInval(pDoc, ChangePt);
+				EachAdjPoint(pDoc, ChangePt, AddToInval);
+			end;
+	end; {AddToInvalidList}
+
+procedure	InvalidByAdj ( gH : p2GoAbstHier; QueryPoint : p2GOPoint );
+	{ The analysis at QueryPoint will be invalidated by any move adjacent to the string }
+	{ at QueryPoint, or any move adjacent to an enemy string adjacent to Query String. }
+		
+	procedure TestAdj ( AdjNode : p2Node );
+			
+		procedure InValidLibs (SecondAdj : p2Node );
+			var LowS2 : PointHighState;
+			begin {InValidLibs}
+				LowS2.PtStateInt := SecondAdj^.LowState; 
+				if LowS2.PtOcc = LibertyOcc then
+					{SecondAdj node is a liberty of an enemy in contact with QueryPoint^.PtNode.}
+					with gH^ do
+						AddToInvalidList (@DocumentInfo, @StringGraph, QueryPoint, 
+																p2GoPoint(SecondAdj^.Child) );
+			end; {InValidLibs}
+			
+		var 
+			LowS : PointHighState;
+		begin {TestAdj}
+			LowS.PtStateInt := AdjNode^.LowState;
+			if LowS.PtOcc = LibertyOcc then
+				{Adj node is a liberty of QueryPoint^.PtNode.}
+				with gH^ do
+					AddToInvalidList (@DocumentInfo, @StringGraph, QueryPoint, 
+															p2GoPoint(AdjNode^.Child) )
+			else
+				{ Adj node is an enemy string.  Its liberties will also invalidate 
+					analysis. }
+				EachAdjNode ( AdjNode, InValidLibs );
+		end; {TestAdj}
+		
+	begin {InvalidByAdj}
+		if QueryPoint <> nil then
+			EachAdjNode ( QueryPoint^.PtNode, TestAdj );
+	end; {InvalidByAdj}
+
+procedure InvalidAnalysisAt ( gH : p2GoAbstHier; atPt : p2GoPoint);
+{	The analysis at atPt has been invalidated by a move, or has been found to be nil.
+	If the move was along the analysis of atPt, then update the
+	analysis.  Else, re-do the analysis.}
+
+const
+	StrSavedAt = 3;  {For now, always do ladder searches with cut-off at 5 (Joint liberties.) }
+var
+	Status : p2Analysis;
+	ReDo : Boolean;
+	LastMove : p2GoPoint;
+	invalAnalysis : p2Analysis;
+	
+		{ removed the nesting, for faster access to Status. kjf }
+		procedure StatusIn1Stone (Pnt : p2Node);
+			{Pnt points to one of the stones in Str.}
+			begin
+				p2GOPoint(Pnt)^.AnalysisResult := Status;
+			end; {StatusIn1Stone}
+						
+		procedure StoreNilAnalysisResult (Pnt : p2Node);
+			{Pnt points to one of the stones in Str.}
+			begin
+				p2GOPoint(Pnt)^.AnalysisResult := nil;
+			end; {StoreNilAnalysisResult}
+			
+		{ This function decides whether or not treeRoot or a sibling is the Move. }
+		{ It allows a generalized tree with alternates at the root. }
+		{ It has a side effect: treeRoot is changed to the tree below Move, or nil }
+		{ if Move is not found. }
+		
+		{ If it has a one level side effect, how can it be called recursively? }
+		{ recursion is a tail-recursion, much more efficient iteratively. }
+		
+		function isRoot ( g : p2Graph; Move : p2GOPoint; 
+											var treeRoot : p2TreeNode ) : Boolean;
+			var
+				tempTree : p2TreeNode;
+			begin
+				isRoot := true; {assume we find it}
+				while treeRoot <> nil do
+					begin
+						if Move = nil then
+							if treeRoot^.TreeMoveX = 0 then {pass, found}
+								begin
+									tempTree := treeRoot;
+									treeRoot := treeRoot^.FirstContinuation;
+									tempTree^.FirstContinuation := nil;
+									{$IFC TraceReturnAnalysis}
+									writeln ('Calling ReturnTree from isRoot #1: ');
+									{$ENDC}
+									ReturnTree ( g, tempTree );
+									exit (isRoot);
+								end
+							else
+								begin
+									tempTree := treeRoot;
+									treeRoot := treeRoot^.NextAlternative;
+									tempTree^.NextAlternative := nil;
+									{$IFC TraceReturnAnalysis}
+									writeln ('Calling ReturnTree from isRoot #2: ');
+									{$ENDC}
+									ReturnTree ( g, tempTree );
+								end
+						else if (treeRoot^.TreeMoveX = Move^.XCoord) and 
+								(treeRoot^.TreeMoveY = Move^.YCoord) then
+							begin  {Move is found.}
+									{$IFC TraceReturnAnalysis}
+									writeln ('Calling ReturnTree from isRoot #3: ');
+									{$ENDC}
+									ReturnTree (g, treeRoot^.NextAlternative);
+									tempTree := treeRoot;
+									treeRoot := treeRoot^.FirstContinuation;
+									tempTree^.FirstContinuation := nil;
+									{$IFC TraceReturnAnalysis}
+									writeln ('Calling ReturnTree from isRoot #4: ');
+									{$ENDC}
+									ReturnTree (g, tempTree);
+									exit (isRoot);
+							end
+						else {Move is not found, search the NextAlternative}
+							begin
+								tempTree := treeRoot;
+								treeRoot := treeRoot^.NextAlternative;
+								tempTree^. NextAlternative := nil;
+								{$IFC TraceReturnAnalysis}
+								writeln ('Calling ReturnTree from isRoot #5: ');
+								{$ENDC}
+								ReturnTree (g, tempTree);
+							end;
+
+					end; {treeRoot <> nil}
+					
+				isRoot := false; {did not find it}
+				
+			end; {isRoot}
+
+{$IFC qTrace}{$D+}{$ENDC}
+	procedure ChangeAdjacent (pDoc: p2DocInfo; chgPt: p2GOPoint);
+		var
+			newState: integer;
+		begin
+			newState := CompPtState (pDoc, chgPt);
+			with gH^ do
+				begin
+					if newState <> chgPt^.PtStrType.PtStateInt then
+						begin
+							{$IFC TraceRequest} 
+							write ('#13 ');
+							{$ENDC}
+							ChangeState (pDoc, @PointGraph, TAbstHierNode(chgPt), 
+									newState, true);
+						end;
+					RequestChanges (pDoc, @StringGraph, chgPt, chgPt^.PtNode);
+				end;
+		end; {ChangeAdjacent}
+		
+var
+	nextPt: p2GoPoint; nextAnalysis: p2Analysis;
+	StartCount: longint;
+begin {InvalidAnalysisAt}
+	{$IFC TraceAnalysisResults}
+	write('Entering InvalidAnalysisAt at = ');
+	PrintPointItem (p2Node(atPt));
+	writeln;
+	{$ENDC}
+	
+	if atPt <> nil then
+		begin
+		
+
+			Redo := true;
+			
+			(* ****
+			
+			if atPt^.AnalysisResult = nil then
+				begin
+					{xxxx Should have analysis joined in abstraction hierarchy.  
+					Sometimes a stone with nil analysis has 
+					a sibling with good analysis. HACK. }
+					nextPt := atPt^.NextPtSameString;
+					nextAnalysis := nil;
+					while nextPt <> nil do
+						if nextPt^.AnalysisResult <> nil then
+							begin
+								nextAnalysis := nextPt^.AnalysisResult;
+								nextPt := nil { stop early }
+							end
+						else
+							nextPt := nextPt^.NextPtSameString;
+					if nextAnalysis <> nil then { found one, propagate it!}
+						begin
+							nextPt := atPt;
+							while nextPt <> nil do
+								if nextPt^.AnalysisResult <> nil then
+									nextPt := nil { stop early }
+								else
+									begin
+										nextPt^.AnalysisResult := nextAnalysis;
+										nextPt := nextPt^.NextPtSameString;
+									end;
+						end;
+				end;
+
+			if atPt^.AnalysisResult <> nil then  {Save what we can.}
+				with gH^, DocumentInfo do
+					begin
+						Status := atPt^.AnalysisResult;
+						EachElement (atPt^.PtNode, StatusIn1Stone);
+						{xxxx HACK.  The above two lines make sure that the
+						analysis is applied to all stones in the string.}
+						LastMove := dGameRecord[dNextMove - 1].MovePoint;
+						invalAnalysis := atPt^.AnalysisResult;
+						with invalAnalysis^ do
+							if isRoot (@PointGraph, LastMove, defendTree) then
+								begin
+									{$IFC TraceAnalysisResults or TraceReturnAnalysis}
+									writeln ('Calling ReturnTree after defendTree found: ');
+									{$ENDC}
+									if isRoot (@PointGraph, LastMove, attackTree) then
+											ReDo := true
+									else
+										begin
+											attackTree := defendTree;
+											defendTree := nil;
+											{Next move--rooted at defendTree.}
+											case result of
+												CanKillCanLive : result := Safe;
+												Safe : ReDo := true;
+												Dead : result := CanKillCanLive;  
+													{String might still be dead -- Redo := true ??? }
+												otherwise ReDo := true;
+											end; {Cases}
+										end;
+								end  {if isRoot (LastMove, defendTree)}
+							else if isRoot (@PointGraph, LastMove, attackTree) then
+								begin
+									{$IFC TraceAnalysisResults or TraceReturnAnalysis}
+									writeln ('Calling ReturnTree after attackTree found: ');
+									{$ENDC}
+									defendTree := attackTree;
+									attackTree := nil;
+									case result of
+										CanKillCanLive : result := Dead;
+										Dead : result := Dead;  
+										Safe : result := CanKillCanLive;
+											{String might still be safe -- Redo := true ??? }
+										otherwise ReDo := true;
+									end;  {Cases}
+								end
+							else
+								ReDo := true;
+								{both attackTree and defendTree have been Returned by isRoot.}
+					end
+			else	{Analysis = nil}
+				Redo := true;
+				
+				*** *)
+				
+			if ReDo then
+				begin
+					{$IFC DoTimers}
+					StartCount := PhaseTimeRecs[StopPhase].count;
+					{$ENDC}
+					NilTheAnalysis (gH, atPt^.PtNode);
+					DameToSave := StrSavedAt;
+					Status := StringStatus (gH, atPt, DEPTH_OF_SEARCH, SEARCH_NODE_LIMIT, true,
+						KillWithLadder, RunFromLadder, LadderBroken);
+					EachElement (atPt^.PtNode, StatusIn1Stone);
+					{$IFC TraceMove }
+					if Status^.result <> Empty then
+						begin
+							{$IFC DoTimers}
+							Write ('#nodes = ', (PhaseTimeRecs[StopPhase].count-StartCount):3,
+								' ');
+							{$ENDC}
+							with atPt^ do
+								WritePoint (XCoord, YCoord);
+							write (' ');
+							WriteStringStatus (Status^.result);
+							writeln;
+						end;
+					{$ENDC}
+				end;
+				
+			with gH^ do
+				{ Analysis may change the status of a point.  Add to the CheckChanges list. }
+				begin
+					RequestChanges (@DocumentInfo, @StringGraph, atPt, atPt^.PtNode);
+					EachAdjPoint (@DocumentInfo, atPt, ChangeAdjacent);
+				end;
+				
+			{$IFC TraceAnalysisResults}
+			write('Leaving InvalidAnalysisAt, Redo ', Redo, ' new Analysis: ');
+			PrintAnalPointItem (Status);
+			writeln;
+			{$ENDC}
+							
+		end {atPt <> nil}
+	else 
+		begin
+			{$IFC qDebug}
+			GOEngineError ('Call to InvalidAnalysisAt with nil pointer', 0, 0);
+			{$ENDC}
+		end;
+end; {InvalidAnalysisAt}
+
+procedure BeginInvalidate (gH : p2GOAbstHier; MovePt : p2GOPoint );
+	{ This routine begins the Invalidation process after a move at MovePt. }
+	{ It pushes the strings to be updated on the documents Invalidate list. }
+	{ and returns. }
+
+	var strPtList, invalPtList: p2ListItem; kid, rep: p2Node;
+	begin {BeginInvalidate}
+		with gH^ do
+			CheckChanges (@DocumentInfo, @PointGraph); { make sure coloring functions up to date }
+		if MovePt <> nil then
+			begin
+				{$IFC TraceStringKill}
+				write('Entering BeginInvalidate at ');
+				PrintPointItem (p2Node(MovePt));
+				write(' Points to invalidate: ');
+				PrintPointList (MovePt^.AnalysisInvalidated);
+				writeln;
+				{$ENDC}
+				LastInvalidationCleanUp := LastInvalidationCleanUp + 1;
+
+				{$IFC TraceMove}
+				writeln ('Calling SetGOAbstHierLevel to PointsGraphLevel.');
+				{$ENDC}
+
+				SetGOAbstHierLevel (gH, PointsGraphLevel);
+
+				{$IFC TraceMove}
+				writeln ('Back from SetGOAbstHierLevel.');
+				{$ENDC}
+				if LastInvalidationCleanUp = INVALIDATE_AFTER then
+					begin { Special "CleanUp" invalidation }
+						InvalidateAll (gH, true );
+					end
+				else
+					begin { Normal "Incremental" invalidation }
+							{ first, update the Representatives, to be the FirstChild of String. }
+							{ (They may have changed, since MovePt has been added to the board. }
+							{ xxx  an alternative: start over with empty list, and push unique }
+							{ xxx this would eliminate duplicates. }
+						strPtList := gH^.DocumentInfo.dAnalysisPoints;
+						while strPtList <> nil do
+							with strPtList ^ do
+								begin
+									rep := ListItem;
+									kid := p2GOPoint(rep)^.PtNode^.Child;
+									if rep <> kid then 
+										ListItem := kid;
+									strPtList := NextListItem;
+								end;
+							{ Now, add the strings that need invalidation because of MovePt }
+						{ Make sure that the new move has an analysis done for it: }
+						push (@gH^.StringGraph, MovePt^.AnalysisInvalidated, p2Node(MovePt));
+						invalPtList := MovePt^.AnalysisInvalidated;
+						while invalPtList <> nil do
+							begin
+								kid := p2GOPoint(invalPtList^.ListItem)^.PtNode^.Child;
+								strPtList := gH^.DocumentInfo.dAnalysisPoints;
+								while strPtList <> nil do
+									with strPtList^ do
+										if {strPtList^.}ListItem = kid then
+											begin
+												strPtList := nil; { end search }
+												kid := nil; { don't push it, duplicate }
+											end
+										else
+											strPtList := {strPtList^.}NextListItem;
+								if kid <> nil then
+									with gH^, DocumentInfo do
+										Push (@StringGraph, dAnalysisPoints, kid);
+								invalPtList := invalPtList^.NextListItem;
+							end; {while invalPtList <> nil}
+						ReturnToAvailList (@gH^.StringGraph, MovePt^.AnalysisInvalidated); {BUG!}
+						{$IFC TraceAnalysisResults}
+						write('Leaving BeginInvalidate, points to invalidate: ');
+						PrintPointList (gH^.DocumentInfo.dAnalysisPoints);
+						writeln;
+						{$ENDC}
+					end;
+			end; {if MovePt <> nil}
+	end; {BeginInvalidate}
+
+function ContinueInvalidate (gH : p2GOAbstHier ): Boolean;
+	{ This routine continues the Invalidation process. }
+	{ It pops one strings to be updated from the documents Invalidate list, }
+	{ and performs the analysis validation.  Returns false if the list is empty. }
+	var OneStrPt: p2GOPoint;
+	begin
+		ContinueInvalidate := true; { assume there will be more }
+		with gH^, DocumentInfo do
+			begin
+				{$IFC TraceAnalysisResults}
+				write('Entering ContinueInvalidate, Points to invalidate: ');
+				PrintPointList (dAnalysisPoints);
+				writeln;
+				{$ENDC}
+				if dAnalysisPoints = nil then
+					ContinueInvalidate := false
+				else
+					begin
+						OneStrPt := p2GOPoint(Pop( @gH^.StringGraph, dAnalysisPoints));
+						InvalidAnalysisAt (gH, OneStrPt );
+					end;
+			end; {with gH^}
+	end; {ContinueInvalidate} 
+
+procedure EndInvalidate (gH : p2GOAbstHier);
+	{ This routine finishes the Invalidation process. }
+	{ It pops all strings to be updated from the documents Invalidate list, }
+	{ and performs the analysis validation. }
+
+	procedure CallInvalidateAnalysis (g : p2Graph; p : p2Node);
+		begin
+			InvalidAnalysisAt ( gH, p2GOPoint(p) );
+			SpinCursor (-32);
+		end; {CallInvalidateAnalysis}
+		
+	begin {EndInvalidate}
+		with gH^, DocumentInfo do
+			begin
+				CheckChanges (@DocumentInfo, @PointGraph); 
+					{ make sure coloring functions up to date }
+				if dAnalysisPoints <> nil then
+					begin
+						{$IFC TraceAnalysisResults}
+						write('Entering EndInvalidate, Points to invalidate: ');
+						PrintPointList (dAnalysisPoints);
+						writeln;
+						{$ENDC}
+						PopEach( @gH^.StringGraph, dAnalysisPoints, CallInvalidateAnalysis );
+					end; {with gH^}
+			end;
+	end; {EndInvalidate}
+	
+procedure InvalidateAll (gH :p2GOAbstHier; DoIncremental: Boolean);
+
+	procedure PushOnInvalidateList (QueryStr: p2Node);
+		begin
+			with gH^, DocumentInfo do
+				push (@StringGraph, dAnalysisPoints, QueryStr^.Child);
+		end; {PushOnInvalidateList}
+
+	procedure CallInvalidateAnalysis (g : p2Graph; p : p2Node);
+		begin
+			InvalidAnalysisAt (gH, p2GOPoint(p) );
+			SpinCursor (-32);
+			if TraceStringAnalysis then
+				begin
+					write('Doing Initial Invalidation at = ');
+					PrintPointItem (p2Node (p2GOPoint(p)));
+					if p2GOPoint(p)^.AnalysisResult = nil then write ('.  No analysis here.');
+					writeln;
+				end;
+		end; {CallInvalidateAnalysis}
+	
+	var x,y: integer;
+	begin
+		with gH^, DocumentInfo do
+			begin
+				ReturnToAvailList (@StringGraph, dAnalysisPoints);
+				CheckChanges (@DocumentInfo, @PointGraph); { make sure coloring functions up to date }
+				EachGOGraphNode (@StringGraph, PushOnInvalidateList);
+				with DocumentInfo do
+					begin
+						for x := 1 to dBoardSize do
+							for y := 1 to dBoardSize do
+								ReturnToAvailList (@StringGraph, dBoard [x,y].AnalysisInvalidated);
+					end;
+				if not DoIncremental then
+					begin
+						{$IFC TraceMove}
+						writeln ('Calling SetGOAbstHierLevel to PointsGraphLevel.');
+						{$ENDC}
+						SetGOAbstHierLevel (gH, PointsGraphLevel);
+						PopEach( @StringGraph, dAnalysisPoints, CallInvalidateAnalysis );
+					end;
+			end;
+	end; {InvalidateAll}
+	
+function GetStatus (gH : p2GoAbstHier; atPt : p2GoPoint) : p2Analysis;
+begin
+	if TraceStringAnalysis then
+		begin
+			write('Entering GetStatus at = ');
+			PrintPointItem (p2Node (atPt));
+			if atPt^.AnalysisResult = nil then write ('.  No analysis here.');
+			writeln;
+		end;
+	if atPt^.AnalysisResult = nil then  {Get new analysis.}
+		InvalidAnalysisAt (gH, atPt);
+	GetStatus := atPt^.AnalysisResult;
+end; {GetStatus}
+	
+{------------------------------------------------------
+procedures for ladder analysis.
+------------------------------------------------------}
+{function Saved for use when string is attacked in a ladder.}
+{ The second test is for a complete analysis.  May be unneccessary. }
+{xxxIf, after the defender's move, there are three liberties, then the
+ladder is broken.
+    This is too weak a condition.
+    Better -- ???
+}
+function LadderBroken(Defender : p2Node):boolean;
+	{ Note: static function, does not do dynamic analysis }
+	{ Try : string escapes if it has two sole liberties or five overall. }
+	{ Other things to try : eliminate empty triangle liberties ? }
+	{ Only count liberties adjacent to territory ? }
+	var NumLibs, NumGoodLibs : integer;
+	
+	procedure TestLibs (adjStr : p2Node);
+		var
+			LowS : PointHighState;
+		begin
+			LowS.PtStateInt := adjStr^.LowState;
+			if LowS.PtOcc = LibertyOcc then
+				{This is a liberty.  Is it useful?}
+				begin
+					NumLibs := NumLibs + 1;
+					{if LowS.Lin1 > 1 then}
+						{ Line 1 liberties are not useful. }
+						begin
+							case LowS.BlAdjWhAdj of
+								B0W0, B0W1, B1W0, B0W2, B2W0, 
+								B3W0, B0W3, B4W0, B0W4: 
+									{Sole lib.}
+									NumGoodLibs := NumGoodLibs + 1;
+							end; {case}
+						end;
+				end;
+		end;	
+
+(* *****  Do "GoodLibs" analysis
+		
+### Here are the rusults of running the test suite, with and without:
+### Done with "GoodLibs" computation turned off.
+ 38 Problems           Total Time : 15:13 secs. =  24.03 sec/test.
+ 22 Problems           Total Time : 9:28 secs. =  25.82 sec/test.
+### Tests run with: NumLibs >= 3, NumGoodLibs >= 2, and Line 1 Libs are Good.
+ 38 Problems           Total Time : 15:16 secs. =  24.11 sec/test.
+ 22 Problems           Total Time : 9:28 secs. =  25.82 sec/test.
+
+### No significant differences!
+### Doesn't cost much.  Doesn't produce different results.
+
+### 	To be useful, need to record the fact that "GoodLibs" (with AND logic) 
+#		was a reason to CONTINUE the search.  Unfortunately, this could introduce
+#		errors in the analysis.  For Example:
+#			White gets four liberties, but 2 are NOT good, so ...
+#			Black continues the attack (occupying one of 4 reducing to 3) ...
+#			BUT, now White has a choice of defending (he is not in atari)
+#				OR attacking a surrounding string with 2 Liberties.
+
+		******* *)
+		
+	begin
+		NumLibs := 0;
+		NumGoodLibs := 0;
+		(* *  Do "GoodLibs" analysis *)
+		EachAdjNode(Defender, TestLibs);
+		(* ** *)
+		{$IFC TraceStringKill}
+		if TraceStringAnalysis then
+			begin
+				write (' ':TraceIndent);
+				writeln('	In LadderBroken, NumLibs = ',
+					NumLibs:1,' and NumGoodLibs = ',NumGoodLibs:1);
+			end;
+		{$ENDC}
+		(*
+		if (NumLibs >= DameToSave) and (NumGoodLibs >= 2) then
+		*)
+		if NumLiberties( Defender ) >= DameToSave  
+		{ and CountBreathingSpaces (some attacking string ) <= 2 } then
+			LadderBroken := true
+		else
+			LadderBroken := false;
+	end; {LadderBroken}
+   
+{function KillTactic for use with ladders.}
+function KillWithLadder (g : p2Graph; Defender : p2Node):p2ListItem;
+		   { Note: static function, does not do dynamic analysis }
+var NoDame, OneDame,TwoDame, MoreDame  : p2ListItem;
+    DefendColor, DefenderDame : integer;
+	 DefenderState: PointHighState;
+  
+	{-----------------------------------------------------
+	procedure ClassifyDefenderLibs will classify all the 
+	liberties of Defender into 1 Dame, 2 Dame, or 3 and more Dame.
+	Note on numDame := 1 - DefenderDame:
+	  EstimateAddedDame has a problem with identifying which string,
+	  adjacent to AdjToDefender, IS Defender.  Therefore, it will
+	  wrongly add DefenderDame - 1 to the number of dame gained 
+	  by that liberty. This fix is cheaper than morking and testing
+	  all strings encountered.
+	--------------------------------------------------------}
+	procedure ClassifyDefenderLibs(AdjToDefender : p2Node);
+	var numDame : integer;
+	
+	    {---------------------------------------------
+		procedure EstimateAddedDame is called via EachAdjNode
+		for each liberty of Defender.
+		It estimates how many dame Defender wwould gain if
+		it played in that liberty.
+		If the node is unoccupied then the move has one dame
+		added to it.  If the node is occupied by a string of
+		the same color as Defender, then we add the number of
+		dame of that string, minus one, to the Dame added by
+		the move in question.
+		------------------------------------------------}
+		procedure EstimateAddedDame(AdjToLib : p2Node);
+		var s: PointHighState;
+		begin
+		   s.PtStateInt := AdjToLib^.LowState;
+		   if s.PtOcc >= UnOcc then
+		      {Point is unoccupied.  Add one dame.}
+			  numDame := numDame + 1
+		   else if s.PtStateInt = DefendColor then
+		       {Defender playing here will connect to another string.}
+				numDame := numDame + NumLiberties(AdjToLib) - 1;
+		end;{EstimateAddedDame}
+
+	var		
+		SaveLib: p2Node;
+		NumLib : integer;
+		
+	procedure FindLib (AdjNode : P2Node);
+		var s: PointHighState;
+		begin
+			s.PtStateInt := AdjNode^.LowState;
+			if s.PtOcc >= UnOcc then 
+				SaveLib := AdjNode;   
+		end; {FindLib}
+
+	procedure EvalLib (Adj2 : p2Node);
+		var adj2Clr : PointHighState;
+		begin
+			adj2Clr.PtStateInt := Adj2^.LowState;
+			if Adj2 <> AdjToDefender then { don't count connecting to self! }
+				begin
+					if adj2Clr.PtOcc = DefenderState.PtOcc then
+						{ This point would connect to adj2Clr. }
+						NumLib :=  NumLib + 2 { just an estimate }
+					else if adj2Clr.PtOcc >= UnOcc then
+						{ This point would gain a liberty. }
+						NumLib := NumLib + 1; { just an estimate }
+				end;
+		end; {EvalLib}
+	
+	var
+		AttackLib, ConnectLib: p2Node;
+
+	procedure FindAttackLib (AdjToAttackStr : P2Node);
+	
+		var
+			Outside: Boolean; { is the liberty outside the attack, 
+				i.e. not adjacent to Defender }
+		
+		procedure CheckAdjDefender (AdjToAdjToAttStr: p2Node);
+			begin
+				if AdjToAdjToAttStr = Defender then
+					outside := false;
+			end; {CheckAdjDefender}
+			
+		var s: PointHighState;
+		begin
+			s.PtStateInt := AdjToAttackStr^.LowState;
+			if s.PtOcc >= UnOcc then {Liberty}
+				begin
+					Outside := true;
+					EachAdjNode (AdjToAttackStr, CheckAdjDefender);
+					if not Outside then
+						AttackLib := AdjToAttackStr;
+				end;
+		end; {FindAttackLib}
+		
+	procedure FindConnectLib (AdjToAttackStr : P2Node);
+	
+		var s: PointHighState;
+		begin
+			s.PtStateInt := AdjToAttackStr^.LowState;
+			if s.PtOcc >= UnOcc then {Liberty}
+				if AdjToAttackStr <> AttackLib then
+					ConnectLib := AdjToAttackStr;
+		end; {FindConnectLib}
+
+	begin {ClassifyDefenderLibs}
+	   DefenderState.PtStateInt := AdjToDefender^.LowState;
+	   if DefenderState.PtOcc >= UnOcc then  { A liberty of defender string }
+			if DefenderState.Lin1 = 1 then
+				Push(g, OneDame, AdjToDefender^.Child) { lowest priority for Line 1 }
+			else
+				begin
+					numDame := 1 - DefenderDame;  {see header of ClassifyDefenderLibs}
+					EachAdjNode (AdjToDefender, EstimateAddedDame);
+					if numDame >= 3 then
+						Push(g, MoreDame, AdjToDefender^.Child)
+					else if numDame = 2 then
+						Push(g, TwoDame, AdjToDefender^.Child)
+					else
+						Push(g, OneDame, AdjToDefender^.Child);
+			  end
+		else { must be Attacker string }
+			if DefenderDame >= 2 then 
+					{ If Defender in Atari, No problem, can just capture. }
+					{ xxx should we relax this, to allow connections that defend snap-backs??? }
+				begin
+					{ The attacker has two liberties, and wants to use one in the
+						attack.  If after the attacking move, there is only one liberty,
+						then the defender will defend by capturing the attacking stones.
+						( Arthur's code would be too late, the defender would capture first. )
+						So the attack we want to consider is to connect the attackings
+						stones, then continue the attack. This will succeed, as long as
+						the defender is unable to use the extra moves to gain additional
+						liberties. }
+					case NumLiberties (AdjToDefender) of
+					
+					1: { Arthur's code: Attacker is in Atari, can we defend, and continue? }
+						begin
+							SaveLib := nil;
+							EachAdjNode (AdjToDefender, FindLib);
+							NumLib := 0;
+							EachAdjNode (SaveLib, EvalLib); { find out if move would help }
+							if NumLib >= 2 then
+								Push(g, OneDame, SaveLib^.Child ); { make it low priority }
+						end;
+					2: {Ken's code: Attacker may cause Atari, can we defend and then attack?}
+						begin
+							AttackLib := nil;
+							EachAdjNode (AdjToDefender, FindAttackLib);
+							if AttackLib <> nil then
+								{ Note: there may not be an AttackLib, 
+									i.e. both may be "outside" the attack. }
+								begin
+									ConnectLib := nil;
+									EachAdjNode (AdjToDefender, FindConnectLib);
+									NumLib := 0;
+									EachAdjNode (ConnectLib, EvalLib); { find out if move would help }
+									if NumLib >= 2 then
+										Push(g, NoDame, ConnectLib^.Child ); { make it low priority }
+								end;
+						end;
+					end; { case NumLiberties }
+				end; {if DefenderDame >= 2}
+	end; {ClassifyDefenderLibs}
+
+begin {KillWithLadder}
+	DefendColor := Defender^.LowState;
+	DefenderDame := NumLiberties (Defender);
+	MoreDame := nil;
+	TwoDame := nil;
+	OneDame := nil;
+	NoDame := nil; { list of Attacker "low priority" save points }
+	EachAdjNode (Defender, ClassifyDefenderLibs);
+	JoinStacks (OneDame, NoDame);
+	JoinStacks (TwoDame,OneDame);
+	if MoreDame = nil then 
+	   begin
+		 		(* *** Don't allow Attacker to pass! 
+		 		if TwoDame = nil then
+					{No move by Defender should gain a dame.  Try passing.}
+					Push(g, OneDame, nil);
+					*** *)
+	      KillWithLadder := TwoDame
+	   end
+	else 
+		begin 
+			JoinStacks (MoreDame, TwoDame);
+			KillWithLadder := MoreDame;
+		end;
+	{If MoreDame <> nil then you don't need to check low priorities.}
+	{BUG! cannont return only the MoreDame moves!
+	Sometimes a OneDame move is the correct move
+	for a Kill, even though there are MoreDame.
+	Example: Vol. 2, Problem 4 where the MoreDame move is illegal Ko.}
+	{BUG #2 The unreturned dame were being dropped on the floor, and
+	not returned to the available list.}
+end;{KillWithLadder}
+	
+
+function RunFromLadder ( g: p2Graph {StringGraph}; 
+		        Defender: P2Node {GoString} ) : p2ListItem;
+	{ Note: static function, does not do dynamic analysis }
+
+var 
+	HighestPriority, HighPriority, SuggestedList, LowPriority : p2ListItem; 
+	OppColor: PointHighState;
+	DefenderLibs: integer;
+    
+	procedure AddPossibleCapture (AttackNode: P2Node {GoString});
+		{---------------------------------------
+			procedure PushLiberties will push  
+			the input node onto the stack Suggested if the node
+			is a liberty.  With EachAdjNode this will push all
+			liberties of a node.
+		 -----------------------------------------}
+		 var 
+		 	BetterKill : boolean;
+			AttackerLibs : integer;
+
+	    procedure PushLiberties(LibNode : P2Node);
+			var s: PointHighState;
+		    begin
+				s.PtStateInt := LibNode^.LowState;
+			     if s.PtOcc >= UnOcc then 
+						if (AttackerLibs = 1) or (NumElements (AttackNode) > 3) then
+							begin
+								if PushUnique (g, HighestPriority, LibNode^.Child) then ;
+							end
+						else 
+							begin
+								if PushUnique (g, HighPriority, LibNode^.Child) then ;
+							end
+			end; {PushLiberties}
+			
+		begin {AddPossibleCapture}
+			if AttackNode^.LowState = OppColor.PtStateInt then
+				(* if NumLiberties (AttackNode) = 1 then *)
+				begin
+					AttackerLibs := NumLiberties (AttackNode);
+					if AttackerLibs <= DefenderLibs then
+					{xxx if AttackNode^.LowState = AtariString?}
+						EachAdjNode(AttackNode, PushLiberties);
+				end;
+		end; {AddPossibleCapture}
+
+	procedure AddPossibleConnects (adjNode: P2Node {GoString});
+		var TestFriendsReturn : boolean;
+
+		procedure TestFriends (SecondAdjNode: P2Node {GoString});
+			begin
+				if SecondAdjNode^.LowState = Defender^.LowState then
+					TestFriendsReturn := true;
+			end; {TestFriends}
+
+		var s: PointHighState;
+		begin {AddPossibleConnects}
+			s.PtStateInt := adjNode^.LowState;
+			if s.PtOcc >= UnOcc then
+				{Trim off cases.}
+				begin
+				   TestFriendsReturn := false;
+				   EachAdjNode(adjNode, TestFriends);
+				   if TestFriendsReturn = true then 
+				      Push(g, HighPriority, adjNode^.Child)
+           		 else if s.Lin1 > 1 then
+				      Push(g, SuggestedList, adjNode^.Child)
+					else
+						Push(g, LowPriority, adjNode^.Child);
+					  
+				end;
+		end; {AddPossibleConnects}
+		
+var 
+	DefS: PointHighState;
+begin	{RunFromLadder}
+
+	HighestPriority := nil;
+	HighPriority := nil;
+	SuggestedList := nil; {empty list}
+	LowPriority := nil;
+	
+	(* *** Don't force Defender to fill in own eyes! Allow him to pass! *)
+	(* Only makes sense if he is not already in atari. *)
+	DefenderLibs := NumLiberties (Defender);
+	if DefenderLibs > 1 then
+		Push (g, LowPriority, nil);
+
+	DefS.PtStateInt := Defender^.LowState;
+	OppColor.PtStateInt := 0;
+	if DefS.PtOcc = BlackOcc then
+		OppColor.PtOcc := WhiteOcc {string of opposite color}
+	else
+		OppColor.PtOcc := BlackOcc;
+	
+ {We want to push low priority items onto the list first.}
+ {AddPossibleConnects will test each adjacent liberty.
+	If that liberty is not adjacent to another Defender string, it
+	will be pushed directly onto SuggestedList.
+	Else, if it is adjacent to another Defender string, it will be pushed 
+	onto a separate stack which holdds higher priority.  Then these two 
+	strings are merged.}
+   
+  	EachAdjNode (Defender, AddPossibleConnects);
+	JoinStacks (HighPriority, SuggestedList);
+	SuggestedList := HighPriority;
+	
+	HighPriority := nil;
+ 	{for all attacking stones adjacent to Defender with only one liberty
+		add that liberty to SuggestedList }
+	(* *** Consider Liberties of strings with <= Defender *** *)
+	EachAdjNode (Defender, AddPossibleCapture);
+	
+	JoinStacks (SuggestedList, LowPriority);
+	JoinStacks (HighPriority, SuggestedList);
+	JoinStacks (HighestPriority, HighPriority);
+	
+  SweepDuplicates (g, HighestPriority);
+  RunFromLadder := HighestPriority;
+end; {RunFromLadder}
+
+
+function FastKill (g : p2Graph; Defender : p2Node):p2ListItem;
+	{ Use a quicker analysis for results of a pass. }
+	{ Note: static function, does not do dynamic analysis }
+	var OneDame,TwoDame, MoreDame  : p2ListItem;
+		 DefendColor, DefenderDame : integer;
+		 DefenderState: PointHighState;
+  
+	procedure ClassifyDefenderLibs(AdjToDefender : p2Node);
+	var numDame : integer;
+	
+		procedure EstimateAddedDame(AdjToLib : p2Node);
+		var s: PointHighState;
+		begin
+		   s.PtStateInt := AdjToLib^.LowState;
+		   if s.PtOcc >= UnOcc then
+		      {Point is unoccupied.  Add one dame.}
+			  numDame := numDame + 1
+		   else if s.PtStateInt = DefendColor then
+		       {Defender playing here will connect to another string.}
+				numDame := numDame + NumLiberties(AdjToLib) - 1;
+		end;{EstimateAddedDame}
+
+	begin {ClassifyDefenderLibs}
+	   DefenderState.PtStateInt := AdjToDefender^.LowState;
+	   if DefenderState.PtOcc >= UnOcc then 
+			if DefenderState.Lin1 = 1 then
+				Push(g, OneDame, AdjToDefender^.Child) { lowest priority for Line 1 }
+			else
+				begin
+					numDame := 1 - DefenderDame;  {see header of ClassifyDefenderLibs}
+					EachAdjNode (AdjToDefender, EstimateAddedDame);
+					if numDame >= 3 then
+						Push(g, MoreDame, AdjToDefender^.Child)
+					else if numDame = 2 then
+						Push(g, TwoDame, AdjToDefender^.Child)
+					else
+						Push(g, OneDame, AdjToDefender^.Child);
+				end;	{ if DefenderState.Lin1 > 1 }
+	end; {ClassifyDefenderLibs}
+
+begin {FastKill}
+	DefendColor := Defender^.LowState;
+	DefenderDame := NumLiberties (Defender);
+	MoreDame := nil;
+	TwoDame := nil;
+	OneDame := nil;
+	EachAdjNode (Defender, ClassifyDefenderLibs);
+	JoinStacks(TwoDame,OneDame);
+	if MoreDame = nil then 
+	   begin
+	      FastKill := TwoDame
+	   end
+	else 
+		begin 
+			JoinStacks (MoreDame, TwoDame);
+			FastKill := MoreDame;
+		end;
+end;{FastKill}
+	
+{-------------------------------------------------
+Function StringStatus returns the status of the 
+string at String.
+Empty,
+CanSave,
+CanKill,
+Safe,
+Dead.
+
+
+--------------------------------------------------}
+	
+function StringStatus (gH : p2GOAbstHier;  DefendStrPt : p2GOPoint; 
+		Depth : integer; MaxNodes: integer; DoingInvalidates: Boolean;
+		function KillTactic (g : p2Graph; Defender : p2Node):p2ListItem;
+		function SaveTactic(g : p2Graph; Defender : p2Node):p2ListItem; 
+		function Saved(Defender : p2Node):boolean
+		 { xxx Later: Evaluation Function}): p2Analysis;
+
+	procedure MarkLibsForInvalidate (str2: p2Node);
+		{ str2 is adjacent to a string of stones }
+		var kid: p2GOPOint;
+		begin
+			kid := p2GOPoint(str2^.Child);
+			if kid^.OccStatus = UnOcc then
+				with gH^ do
+					AddToInvalidList (@DocumentInfo, @StringGraph, DefendStrPt, kid);
+		end; {MarkLibsForInvalidate}
+
+	var 
+		AttackStonesLost, DefenseStonesLost: integer;
+
+	function SaveString( Horizon, Level : integer; {Limit recursion by size, and cyclic captures.}
+				var SuccessfulMoveTree : p2TreeNode { Tree of moves in analysis }): integer;
+		FORWARD;
+
+{--------------------------------------------------
+KillString answers the question : Can this string be killed if
+an attacker moves first?
+Lookahead via co-recursive functions.
+Bounded by KillTactic = function to generate "relevant moves."
+No need for Alpha-Beta.  No evaluation function needed beyond 
+  CountBreathingSpaces and Saved.
+Both Co-Recursive functions return the max side of minimax.
+Can return 3 values :
+StringDead : 0;
+StringAlive : 1;
+Unknown : 2;
+
+This does take snap-back into account.
+
+SuccessfulMove is a p2Node that points to the POINT of the successful capturing move.
+
+KillString/SaveString build Trees of moves.
+	The first call determines which side of the recursion we are
+		working on.
+	We only add the single working move for that side of the recursion.
+	We add all attempts for the other side.
+	If no attempt works for that side, the returned tree is empty.
+--------------------------------------------------}
+
+function KillString (Horizon, Level : integer; {Limit recursion by size, and cyclic captures.}
+			
+			var SuccessfulMoveTree : p2TreeNode { Tree of moves in analysis }): integer;
+
+{ *** If any path leads to Death then return Dead else return Alive, Ko, Snapback, etc. *** }
+var
+   CandidateMoves : p2ListItem;
+   done : boolean;
+   KillReturn : integer;
+   LegalMove : integer;
+   atPt : Point;
+   ContinuationMoveTree : p2TreeNode;
+   SiblingMoveTree : p2TreeNode;
+   KillPoint : p2GoPoint;
+	
+	Seen_illegalKo: Boolean;
+	PossibleKoFight: Boolean;
+   
+	procedure FindLib(AdjNode : P2Node);
+		var s: PointHighState;
+		begin
+			s.PtStateInt := AdjNode^.LowState;
+			 if s.PtOcc >= UnOcc then 
+			    KillPoint := p2GoPoint(AdjNode^.Child);   
+		end;
+   
+begin {KillString}
+	{$IFC TraceStringKill}
+		if TraceStringAnalysis then
+		begin
+			write (' ':TraceIndent);
+			TraceIndent := TraceIndent + 3;
+			write('Entering KillString, ');
+		end;
+	{$ENDC}
+	
+	CandidateMoves := nil;
+	SuccessfulMoveTree := nil;
+	ContinuationMoveTree := nil;
+	SiblingMoveTree := nil;
+	
+	Seen_illegalKo := false;
+	PossibleKoFight := false;
+
+	KillReturn := StringAlive;  {be pessimistic}
+	
+	with gH^ do
+		CandidateMoves := KillTactic( @StringGraph, DefendStrPt^.PtNode);
+
+	{KillTactic is a procedure that searches out good moves to try.
+	Advice represented in KillTactic.
+	Advice also used one level up when choosing which tactic procedure to use.}
+	
+	{NOTE: if attacker cannot play due to illegal Ko capture then attacker is allowed to pass.}
+
+	{$IFC TraceStringKill}
+		if TraceStringAnalysis then
+			begin
+				write('KillTactic Suggested ');
+				PrintPointList (CandidateMoves);
+				writeln;
+			end;
+	{$ENDC}
+	
+	done := CandidateMoves = nil;
+	{We are done when we have no more moves or we find a winning move} 
+	
+	while not done  do
+		begin
+			with gH^ do
+				KillPoint := p2GoPoint(Pop (@StringGraph, CandidateMoves));
+			
+			{$IFC TraceStringKill}
+				if TraceStringAnalysis then
+					begin
+						write (' ':TraceIndent);
+						write('KillString Making Move ');
+						PrintPointItem (p2Node(KillPoint));
+					end;
+			{$ENDC}
+			
+			LegalMove := TryMakeMove (gH, atPt,  false, KillPoint, true, false {temporary});
+			CountNodes := CountNodes + 1;
+			EndOfPhase (StopPhase);
+			
+			{ XXXX Ko seems to return 3, not 4. (See Prob 4 from Vol. 2) }
+			if LegalMove = 4 { illegal Ko } then
+				begin
+					{$IFC TraceStringKill}
+						if TraceStringAnalysis then
+							begin
+								writeln(' illegal KO');
+							end;
+					{$ENDC}
+					
+					{ there are really two meanings to "Ko" in a String Kill/Save analysis: 
+					A.	Capturing (the target) results in a Ko condition, 
+							i.e. will need to ignore threat and fill.  
+							This is handled below, and sets the result to Ko.
+					B.	A Ko condition was encountered on path to capture, 
+							i.e. Attacker needs to make a threat (pass) in order to capture.
+						
+					The two are independent.
+						Can both occur for the same string?  I think so.
+					
+					Examples:
+						(1.) Defender has just taken Ko, so target is in Atari.  Attackers
+						only move is illegal Ko re-capture. Inserting pass, allows the
+						defender to fill, which if it saves the string, means the result
+						is PossibleKoFight (the outcome of the KoFight is not explored).
+						
+						(2.) Target string has one eye and one liberty which is part of
+						a Ko, and perhaps some outside liberties.  (Foolish) Attacker might
+						take the Ko first, Defender encounters Illegal Ko trying to 
+						retake, passes instead.  Attacker will then fill outside liberty,
+						defender retakes the Ko.  Now the Attacker encounters illegal
+						Ko retake, and might pass in order to retake (eventually).
+							
+						We might call the first KoCapture, and allow as a return value.
+						The second might be called KoFight, and is a property of the tree path.
+						It would be nice to continue the search, 
+							to see if KoFight can be improved to dead. }
+
+						 { allow attacker to make a KO pass, as a last resort! }
+					if CandidateMoves = nil then
+						begin { do it immediately! }
+							push (@gH^.StringGraph, CandidateMoves, nil);
+							PossibleKoFight := true;
+							Seen_illegalKo := true;
+						end
+					else { wait til the "last resort" }
+						Seen_illegalKo := true;
+				end
+			else if LegalMove <> 0 {KillPoint was illegal} then
+				begin 
+					{$IFC TraceStringKill}
+						if TraceStringAnalysis then
+							begin
+								writeln(' illegal: ', LegalMove);
+							end;
+					{$ENDC}
+				end
+			else { LegalMove = 0 KillPoint was legal} 
+				begin
+					{$IFC TraceStringKill}
+						if TraceStringAnalysis then
+							if TraceAnalysisLimits then
+								writeln(' Attackers Lost: ', AttackStonesLost:1, 
+										 ' Defenders Lost: ', DefenseStonesLost:1);
+					{$ENDC}
+					with gH^, DocumentInfo do
+						DefenseStonesLost := DefenseStonesLost + 
+							NumCaptures(@DocumentInfo, dNextMove-1);
+						
+					if DoMarkInvalid then
+						with gH^ do
+							AddToInvalidList(@DocumentInfo, @StringGraph, DefendStrPt, KillPoint);
+					
+					if  DefendStrPt^.OccStatus = UnOcc  then
+						{ the defender has been killed! }
+						{ xxx have we lost snapback? Yes! }
+						begin							
+							NewMoveTreeNode(@gH^.PointGraph, SuccessfulMoveTree, KillPoint);
+							
+							with gH^, DocumentInfo do
+								if dKoPoint <> nil then
+									KillReturn := Ko { for opponent! }
+								else 
+									if numLiberties (KillPoint^.PtNode) = 1 then
+										if (NumCaptures(@DocumentInfo, dNextMove-1) 
+												> NumElements(KillPoint^.PtNode)) then
+											{ don't count as Snapback, captures of more stones }
+											{ than opponent will re-capture. }
+											KillReturn := StringDead
+										else
+											KillReturn := Snapback
+									else 
+										KillReturn := StringDead;
+									
+							done := true;
+						end
+					else 
+						begin { defender needs more attacking }
+						
+							if AttackStonesLost > CycleLimit then
+								begin
+									{$IFC TraceStringKill or TraceMove}
+										if TraceAnalysisLimits then
+											begin
+												write ('***Attack Cycle limit exceeded. ', AttackStonesLost:1);
+												PrintPointItem (p2Node(DefendStrPt));
+												writeln;
+											end;
+									{$ENDC}
+									KillReturn := StringAlive; { too unprofitable to kill! }
+									done := true;
+								end
+							else if (Level > Horizon) or (CountNodes > LimitNodes) then
+								begin
+									{$IFC TraceStringKill or TraceMove}
+										if TraceAnalysisLimits then
+											begin
+												write ('***Horizon or Count Limit exceeded. ');
+												PrintPointItem (p2Node(DefendStrPt));
+												write(' Level: ', Level:1, ', CountNodes: ', CountNodes:1,
+															' ');
+												writeln;
+											end;
+									{$ENDC}
+									KillReturn := Unknown; 
+									done := true;
+								end  {search to complex, or cyclic captures}
+							else { defender gets some more attacking! }
+								begin
+									KillReturn := SaveString (Horizon, Level + 1, 
+										ContinuationMoveTree);
+										
+									if (KillReturn = StringDead) or 
+										(KillReturn = Unknown) then  { other values? }
+										done := true;
+								end;
+							
+							if TryingToKill then	{Return only the working move.}
+								if KillReturn = StringDead then
+									begin
+										NewMoveTreeNode(@gH^.PointGraph, SuccessfulMoveTree, KillPoint);
+										AddChild ( SuccessfulMoveTree, ContinuationMoveTree );
+										ContinuationMoveTree := nil;
+										{$IFC TraceStringKill}
+											if TraceStringAnalysis then
+												begin
+													write (' ':TraceIndent);
+													write('KillReturn = StringDead.  Success with ');
+													with SuccessfulMoveTree^ do
+														WritePoint (TreeMoveX, TreeMoveY);
+													writeln;
+												end;
+										{$ENDC}
+									end
+								else
+									begin
+										{$IFC TraceStringKill}
+										write (' ':TraceIndent);
+										{$ENDC}
+										{$IFC TraceStringKill or TraceReturnAnalysis}
+										write('KillReturn = StringAlive.  Returning tree ');
+										PrintTree(ContinuationMoveTree);
+										writeln;
+										{$ENDC}
+										ReturnTree ( @gH^.PointGraph, ContinuationMoveTree);
+									end
+							else	{ not TryingToKill - Return every move.}
+								begin
+									NewMoveTreeNode(@gH^.PointGraph, SiblingMoveTree, KillPoint);
+									AddChild ( SiblingMoveTree, ContinuationMoveTree );
+									ContinuationMoveTree := nil;
+									AddSibling ( SuccessfulMoveTree, SiblingMoveTree );
+									{$IFC TraceStringKill}
+										if TraceStringAnalysis then
+											begin
+												write (' ':TraceIndent);
+												writeln('Adding Every Move to Tree. ');
+												write (' ':TraceIndent);
+												write ('Adding ');
+												with SiblingMoveTree^ do
+													WritePoint (TreeMoveX, TreeMoveY);
+												write (' to ');
+												PrintTree(SuccessfulMoveTree);
+												writeln;
+											end;
+									{$ENDC}
+									SiblingMoveTree := nil;
+								end;
+						end; { defender needs more attacking }
+					
+					{$IFC TraceStringKill}
+						if TraceStringAnalysis then
+							begin
+								write (' ':TraceIndent);
+								write('KillString UnMaking Move ');
+								PrintPointItem (p2Node(KillPoint));
+								writeln;
+							end;
+					{$ENDC}
+					
+					with gH^, DocumentInfo do
+						DefenseStonesLost := DefenseStonesLost - 
+							NumCaptures (@DocumentInfo, dNextMove-1);
+						
+					UnMakeMove (gH);
+				
+				end; {if move was legal...}
+			
+			if not done then 
+				begin
+					done := CandidateMoves = nil;
+					if done then { list is empty! and haven't found a result }
+						if Seen_illegalKo and (not PossibleKoFight) then
+							begin
+								push (@gH^.StringGraph, CandidateMoves, nil);
+								PossibleKoFight := true;
+								done := false; {one last try!}
+							end;
+				end;
+		
+		end;  {while not done...}
+		
+	ReturnToAvailList (@gH^.StringGraph, CandidateMoves);
+	KillString := KillReturn;
+
+{$IFC TraceStringKill or TraceMove}
+	if (Level > Horizon) or (CountNodes > LimitNodes) then
+		if TraceAnalysisLimits then
+			begin
+				write ('***Horizon or Count Limit exceeded. ');
+				PrintPointItem (p2Node(DefendStrPt));
+				write(' Level: ', Level:1, ', CountNodes: ', CountNodes:1,
+							' ');
+				PrintTree (ContinuationMoveTree);
+				writeln;
+			end;
+{$ENDC}
+	
+{$IFC TraceStringKill}
+	if TraceStringAnalysis then
+		begin
+			TraceIndent := TraceIndent - 3;
+			write (' ':TraceIndent);
+			write('Leaving KillString: ');
+			WriteStringStatus (KillReturn);
+			if KillReturn = StringDead then
+				if SuccessfulMoveTree <> nil then
+					begin
+						write (' success with: ');
+						with SuccessfulMoveTree^ do
+							WritePoint (TreeMoveX, TreeMoveY);
+					end
+				else
+					write(' SuccessfulMoveTree is nil.');
+			writeln;
+		end;
+{$ENDC}
+end;  {KillString}
+
+function SaveString (Horizon, Level : integer; {Limit recursion by size, and cyclic captures.}
+			var SuccessfulMoveTree : p2TreeNode { Tree of moves in analysis }): integer;
+
+var SaveReturn : integer;  {Holds the value to be returned until calculations
+			    are finished.}
+	LegalMove : integer;
+	TestMove : p2Node;   {The move to try on each cycle through the loop.}
+	CandidateMoves : p2ListItem;
+	done : boolean;
+	changePt : p2GOPoint;
+	atPt : Point;  {Dummy variable for call to TryMakeMove}
+	ContinuationMoveTree : p2TreeNode;
+	SiblingMoveTree : p2TreeNode;
+{*** If any move leads to safety, the stones are safe.}
+begin
+{$IFC TraceStringKill}
+	if TraceStringAnalysis then
+		begin
+			write (' ':TraceIndent);
+			TraceIndent := TraceIndent + 3;
+			write('Entering SaveString, ');
+		end;
+{$ENDC}
+
+	CandidateMoves := nil;
+	SuccessfulMoveTree := nil;
+	SiblingMoveTree := nil;
+	ContinuationMoveTree := nil;
+	
+	with gH^ do
+		CandidateMoves := SaveTactic (@StringGraph, DefendStrPt^.PtNode);
+	
+	{$IFC TraceStringKill}
+		if TraceStringAnalysis then
+			begin
+				write('SaveTactic Suggested ');
+				PrintPointList (CandidateMoves);
+				writeln;
+			end;
+	{$ENDC}
+
+	done := CandidateMoves = nil;
+	
+	SaveReturn := StringDead; 
+	
+	while not done do
+		begin
+			with gH^ do
+				TestMove := Pop(@StringGraph, CandidateMoves);
+			
+			changePt := p2GoPoint (TestMove);  {xxx is this the best way?}
+			
+			{$IFC TraceStringKill}
+				if TraceStringAnalysis then
+					begin
+						write (' ':TraceIndent);
+						write('SaveString Making Move ');
+						PrintPointItem (p2Node (ChangePt));
+					end;
+			{$ENDC}
+			
+			LegalMove := TryMakeMove (gH, atPt,  false, ChangePt, true, false {temporary});
+			
+			EndOfPhase (StopPhase);
+
+			if LegalMove <> 0 {if TestMove was illegal} then
+				begin
+				{$IFC TraceStringKill}
+					if TraceStringAnalysis then
+						writeln(' illegal. ');
+				{$ENDC}
+				end
+			else {LegalMove = 0, TestMove was legal}
+				begin
+
+					with gH^, DocumentInfo do
+						AttackStonesLost := AttackStonesLost + 
+							NumCaptures(@DocumentInfo, dNextMove-1);
+						
+					{$IFC TraceStringKill}
+						if TraceStringAnalysis then
+							begin
+								if TraceAnalysisLimits then
+									write (' Attackers Lost: ', AttackStonesLost:1, 
+											 ' Defenders Lost: ', DefenseStonesLost:1);
+								writeln;
+							end;
+					{$ENDC}
+
+					if DoMarkInvalid then
+						with gH^ do
+							AddToInvalidList(@DocumentInfo, @StringGraph, DefendStrPt, ChangePt);
+					
+					if Saved ( DefendStrPt^.PtNode ) then 
+						begin
+							SaveReturn := StringAlive; 
+							done := true;
+						end
+					else 
+						begin
+						
+							{ check for CycleLimit }
+							if DefenseStonesLost > CycleLimit then
+								begin
+									{$IFC TraceStringKill or TraceMove}
+										if TraceAnalysisLimits then
+											begin
+												write ('***Cycle limit exceeded ');
+												PrintPointItem (p2Node(DefendStrPt));
+											end;
+									{$ENDC}
+									SaveReturn := Unknown; 
+									done := true;
+								end
+							else
+								begin
+									{ Don't check Horizon or Count Limit here, only in KillString }
+									SaveReturn := KillString (Horizon, Level + 1, ContinuationMoveTree);
+									{xxx Should we test Horizon here?  
+											I think not -- tested only in KillString.}
+									if (SaveReturn = StringAlive) or
+										(SaveReturn = Unknown) then 
+										done := true;
+								end;
+
+						end;  {if Saved }
+					
+					if not TryingToKill then {return only the single working path, or nothing.}
+						if SaveReturn = StringAlive then
+							begin
+								NewMoveTreeNode(@gH^.PointGraph, SuccessfulMoveTree, ChangePt);
+								AddChild ( SuccessfulMoveTree, ContinuationMoveTree );
+								ContinuationMoveTree := nil;
+								{$IFC TraceStringKill}
+									if TraceStringAnalysis then
+										begin
+											write (' ':TraceIndent);
+											write('SaveReturn = StringAlive.  Success with ');
+											with SuccessfulMoveTree^ do
+												WritePoint (TreeMoveX, TreeMoveY);
+											writeln;
+										end;
+								{$ENDC}
+							end
+						else
+							begin
+								{$IFC TraceStringKill}
+								write (' ':TraceIndent);
+								{$ENDC}
+								{$IFC TraceStringKill or TraceReturnAnalysis}
+								write('SaveReturn = StringAlive.  Returning tree ');
+								PrintTree(ContinuationMoveTree);
+								writeln;
+								{$ENDC}
+								ReturnTree ( @gH^.PointGraph, ContinuationMoveTree);
+								{$IFC TraceStringKill}
+									if TraceStringAnalysis then
+										begin
+											write (' ':TraceIndent);
+											writeln('Returned Tree ');
+										end;
+								{$ENDC}
+							end
+					else	{return all paths tried.}
+						begin
+							NewMoveTreeNode(@gH^.PointGraph, SiblingMoveTree, ChangePt);
+							AddChild ( SiblingMoveTree, ContinuationMoveTree );
+							ContinuationMoveTree := nil;
+							AddSibling ( SuccessfulMoveTree, SiblingMoveTree );
+							{$IFC TraceStringKill}
+								if TraceStringAnalysis then
+									begin
+										write (' ':TraceIndent);
+										writeln('Adding Every Move to Tree. ');
+										write (' ':TraceIndent);
+										write ('Adding ');
+										with SiblingMoveTree^ do
+											WritePoint (TreeMoveX, TreeMoveY);
+										write (' to ');
+										PrintTree(SuccessfulMoveTree);
+										writeln;
+									end;
+							{$ENDC}
+							SiblingMoveTree := nil;
+						end;{if not TryingToKill}
+					
+					{$IFC TraceStringKill}
+						if TraceStringAnalysis then
+							begin
+								write (' ':TraceIndent);
+								write('SaveString UnMaking Move ');
+								PrintPointItem (p2Node (ChangePt));
+								writeln;
+							end;
+					{$ENDC}
+					
+					with gH^, DocumentInfo do
+						AttackStonesLost := AttackStonesLost - 
+							NumCaptures(@DocumentInfo, dNextMove-1);
+						
+					UnMakeMove (gH);
+					
+				end;  {if Legal Move}
+			
+			if not done then 
+				done := CandidateMoves = nil;
+		
+		end; {while not done...}
+	
+	ReturnToAvailList (@gH^.StringGraph, CandidateMoves);
+	SaveString := SaveReturn;
+	
+{$IFC TraceStringKill}
+	if TraceStringAnalysis then
+		begin
+			TraceIndent := TraceIndent - 3;
+			write (' ':TraceIndent);
+			write('Leaving SaveString: ');
+			WriteStringStatus (SaveReturn);
+			if SaveReturn = StringAlive then
+				if SuccessfulMoveTree <> nil then
+					begin
+						write (' success with: ');
+						with SuccessfulMoveTree^ do
+							WritePoint (TreeMoveX, TreeMoveY);
+					end
+				else
+					write(' SuccessfulMoveTree is nil.');
+			writeln;
+		end;
+{$ENDC}
+end;  {SaveString.}
+
+var x,y : integer;
+	tempWantGraphics : boolean;
+	OnMove: Boolean; { true if Attacker has move, false otherwise }
+	AttackerMove, DefenderMove : integer;
+	defMove, attackMove : p2TreeNode;
+	nl: integer;
+	retStatus: integer;
+	
+	LegalMove: integer;
+	PassPt: p2GOPoint; { nil, var parameter for TryMakeMove}
+	atPt: Point; { dummy for TryMakeMove }
+	
+begin {StringStatus}
+	if TraceStringAnalysis then
+		begin
+			write ('Entering StringStatus for ');
+			PrintPointItem (p2Node (DefendStrPt));
+			writeln;
+		end;
+		
+	DoMarkInvalid := DoingInvalidates; 
+		{ always true for now, variable after the demise of CanKill }
+	
+	CountNodes := 0; LimitNodes := MaxNodes;
+	defMove := nil;
+	attackMove := nil;
+	StringStatus := nil;
+	PassPt := nil;
+	
+	with gh^,DocumentInfo do
+		begin
+			tempWantGraphics := dWantGraphics;
+			dWantGraphics := false;
+
+			if DefendStrPt^.OccStatus = UnOcc then
+				retStatus := Empty
+			else
+				begin
+					{How shall we kill the string?
+					For now, we can only use a ladder.}
+					nl := NumLiberties (DefendStrPt^.PtNode);
+					if nl > DameToSave  then
+						begin
+							{ Quick way to trim off easy cases}
+							retStatus := Safe;
+							if DoMarkInvalid then
+								EachAdjNode (DefendStrPt^.PtNode, MarkLibsForInvalidate);
+						end
+					else if	(NumElements (DefendStrPt^.PtNode) = 1) and (nl = 4) then
+						begin
+							{ Single, uncontacted stone: easy case.}
+							retStatus := Safe;
+							if DoMarkInvalid then
+								EachAdjNode (DefendStrPt^.PtNode, MarkLibsForInvalidate);
+						end
+					else	 { Some searching is necessary. }
+						begin
+							
+							{ Can an attacker kill by going first? }
+							OnMove := (dBlackToPlay = (DefendStrPt^.OccStatus = WhiteOcc));
+								{ Black to play with White target, or vice versa }
+							if not OnMove then { Pass }
+								LegalMove := TryMakeMove (gH, atPt, false, PassPt {pass}, true,
+																	false {temporary});
+							
+							TryingToKill := true;  SetCycleLimit (DefendStrPt);
+							
+							AttackStonesLost := 0; DefenseStonesLost := 0;
+
+							EndOfPhase (StartPhase); 
+							{ dummy, just to set timers, without losing the current time }
+							
+								{ It is the attacker's move }
+							AttackerMove := KillString (Depth, 0, attackMove);
+									 
+							(* *** How much did this save? How much did it break?
+							else
+								{ Do a briefer search }
+								AttackerMove := KillString ({FastKill},
+										 Depth, 0, attackMove);
+								*** *)
+							
+							if not OnMove then { Pass }
+								UnMakeMove (gH);
+								
+							{ fixed bug 7/29/88: the StringAlive's here had been "Safe" }
+							if AttackerMove = StringAlive then 
+								DefenderMove := StringAlive
+							else
+								begin
+									{ Can defender save by going first?}
+									{ do full "pass" so Ko flag gets set correctly }
+									if OnMove then
+										LegalMove := TryMakeMove (gH, atPt, false, PassPt {pass}, true,
+																			false {temporary});
+									
+									(* *** Not needed:
+									EndOfPhase (StartPhase); 
+									{ dummy, just to set timers, without losing the current time }
+									*** *)
+							
+									TryingToKill := false;  SetCycleLimit (DefendStrPt);
+									AttackStonesLost := 0; DefenseStonesLost := 0;
+									
+										{ It is the defender's move }
+									DefenderMove := SaveString (Depth, 0, defMove);
+											 
+									(* *** How much did this cost? how much did it break?
+									else
+										{ Do a briefer search }
+										DefenderMove := SaveString ({FastKill,}
+												 Depth, 0, defMove);
+										*** *)
+												 
+									if OnMove then
+										UnMakeMove (gH);
+												
+									{$IFC TraceStringKill}
+									if TraceStringAnalysis then
+										begin
+											write ('Attacker: ');
+											WriteStringStatus (AttackerMove);
+											write (', Defender: ');
+											WriteStringStatus (DefenderMove);
+											writeln;
+										end;
+									{$ENDC}
+								end;
+							
+							if AttackerMove = Unknown then
+								if DefenderMove = StringAlive then
+									retStatus := UnknownCanLive
+								else
+									retStatus := Unknown
+							else if DefenderMove = Unknown then
+								if AttackerMove = StringDead then
+									retStatus := CanKillUnknown
+								else
+									retStatus := Unknown
+							else if (AttackerMove = SnapBack) then
+								retStatus := Snapback
+							else if AttackerMove = Ko then
+								if DefenderMove = StringDead then
+									retStatus := Dead
+								else
+									retStatus := Ko
+							else if AttackerMove = StringDead then
+								if DefenderMove = StringDead then
+									retStatus := Dead
+								else
+									retStatus := CanKillCanLive
+							else
+								retStatus := Safe;
+				
+							if DoMarkInvalid then
+								InvalidByAdj ( gH, DefendStrPt );
+							
+						end;	 {if searching is needed...}
+						
+					{ don't need analysis for empty points }
+					StringStatus := NewAnalysis (@PointGraph, retStatus, attackMove, defMove,
+							p2Node(DefendStrPt), StringsGraphLevel);
+					
+				end;  {if String <> empty. }
+				
+			dWantGraphics := tempWantGraphics;
+			
+		 end; {with gH^, DocumentInfo. }
+		 
+	if TraceStringAnalysis then
+		begin
+			write ('Leaving String Status for ');
+			PrintPointItem (p2Node (DefendStrPt));
+			write (' ');
+			writeStringStatus (retStatus);
+			writeln;
+		end;
+end;  {StringStatus}
+
+
+procedure WriteStringStatus (SS: integer);
+	begin
+		case SS of
+			StringDead: 	write ('StringDead');
+			StringAlive:	write ('StringAlive');
+			Unknown: 		write ('Unknown');
+			CanKillUnknown: 		write ('CanKillUnknown');
+			UnknownCanLive: 		write ('UnknownCanLive');
+			Alive: 			write ('Alive');
+			Dead: 			write ('Dead');
+			Empty: 			write ('Empty');
+			CanKillCanLive: write ('CanKillCanLive');
+			Ko : 			write ('Ko');
+			Snapback : 		write ('Snapback');
+			Safe: 			write ('Safe');
+		end; {cases}
+	end; {WriteStringStatus}

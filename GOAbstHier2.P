@@ -1,0 +1,770 @@
+{	GOAbstHier2		Implementation of GOAbstHier.p
+
+	DESCRIPTION
+		GO Abstraction Hierarchy -- Defines:
+			Four/five layered, linear hierarchy of graphs.
+			Coloring functions for nodes at each level.
+
+	AUTHOR
+			Ken Friedenbach
+			Copyright 1986-1988
+			All Rights Reserved
+			
+	BUGS
+
+}
+const
+
+	DoColorDrawing = FALSE;
+	
+	NodeChunkSize = 10;
+	ArcChunkSize = 20;
+
+{$S GDebug }
+procedure WriteAnalType (i: integer);
+	begin
+		case i of
+			101: write ('GroupKill');
+			102: write ('GroupSave');
+			103: write ('OpponentKillAnal');
+			104: write ('FriendSaveAnal');
+			108: write ('ExtendMoveAnal');
+			109: write ('JosekiMoveAnal');
+			201: write ('DefendCutPointAnal');
+			202: write ('MakeCutPointAnal');
+			203: write ('DefendConnectStringAnal');
+			204: write ('MakeConnectStringAnal');
+			205: write ('DoubleAtariAnal');
+			206: write ('SingleAtariAnal');
+			207: write ('HaneAnal');
+			208: write ('PressMove');
+			otherwise
+				write ('Unknown Analysis type ', i:1);
+		end; {cases}
+	end; {WriteAnalType}
+
+
+{$S GOAbstHier }
+{$IFC qTrace}{$D++}{$ENDC}
+procedure GOAbstHierError (s: Str255);
+	begin
+		KoncatCst (@s, ', in GOAbstHier Unit.');
+		GOEngineError (s, 0, 0);
+	end; {GOAbstHierError}
+
+{ *** Group Nodes have additional information: *** }
+procedure MoreGroupNodes (WhichGraph: p2Graph; nodSize: integer);
+	var pChunk: ChunkList; pN: p2Node; i: integer;
+	begin
+		pChunk := ChunkList (NewPtr (4+NodeChunkSize * nodSize));
+		if pChunk = nil then
+			GOAbstHierError('Memory Full');
+		pChunk^.nextChunk := WhichGraph^.NodeChunckList;
+		WhichGraph^.NodeChunckList := pChunk;
+		pN := p2Node (ord4 (pChunk) + 4);
+		{ xxx optimize further? with ... }
+		with WhichGraph^ do
+			for i := 1 to NodeChunkSize do
+				begin
+					with pN^ do
+						begin
+							Parent := AvailNodes;
+							HighState := ChunkFreeNode;
+						end;
+					AvailNodes := pN;
+					pN := pointer (ord4(pN) + nodSize);
+				end;
+	end; {MoreGroupNodes}
+
+procedure MoreGONodes (WhichGraph: p2Graph; nodSize: integer);
+	var pChunk: ChunkList; pN: p2Node; i: integer;
+	begin
+		pChunk := ChunkList (NewPtr (4+NodeChunkSize * nodSize));
+		if pChunk = nil then
+			GOAbstHierError('Memory Full');
+		pChunk^.nextChunk := WhichGraph^.NodeChunckList;
+		WhichGraph^.NodeChunckList := pChunk;
+		pN := p2Node (ord4 (pChunk) + 4);
+		{ xxx optimize further? with ... }
+		with WhichGraph^ do
+			for i := 1 to NodeChunkSize do
+				begin
+					with pN^ do
+						begin
+							Parent := AvailNodes;
+							HighState := ChunkFreeNode;
+						end;
+					AvailNodes := pN;
+					pN := pointer (ord4(pN) + nodSize);
+				end;
+	end; {MoreGONodes}
+
+procedure MoreGOArcs (WhichGraph: p2Graph; nodSize: integer);
+	var pChunk: ChunkList; pA: p2Arc; i: integer;
+	begin
+		pChunk := ChunkList (NewPtr (4 + ArcChunkSize * nodSize));
+		if pChunk = nil then
+			GOAbstHierError('Memory Full');
+		pChunk^.nextChunk := WhichGraph^.ArcChunckList;
+		WhichGraph^.ArcChunckList := pChunk;
+		pA := p2Arc (ord4 (pChunk) + 4);
+		for i := 1 to ArcChunkSize do
+			with WhichGraph^ do
+				begin
+					with pA^ do
+						begin
+							InNext := AvailArcs;
+							ImageCount := ChunkFreeNode;
+						end;
+					AvailArcs := pA;
+					pA := pointer (ord4(pA) + nodSize);
+				end;
+	end; {MoreGOArcs}
+
+const
+	MaxSetLevel = GroupsGraphLevel; { AreasGraphLevel is highest defined }
+	
+procedure ClearAbstHier (gH: p2GOAbstHier);
+{ Called at termination, to free chunks of memory, }
+{ or during dBoard resize, etc. (by InitGOAbstHier). }
+	var lev: TGraphLevel;
+		begin
+			with gH^ do
+				for lev := PointsGraphLevel to succ(MaxSetLevel)  do
+					case lev of
+						PointsGraphLevel:
+							ClearGraph (@PointGraph);
+						StringsGraphLevel:
+							ClearGraph (@StringGraph);
+						BlocksGraphLevel:
+							ClearGraph (@BlockGraph);
+						GroupsGraphLevel:
+							ClearGraph (@GroupGraph);
+						AreasGraphLevel:
+							ClearGraph (@AreaGraph);
+					end; {cases}
+		end; {ClearAbstHier}
+		
+function InitGOAbstHier (gH: p2GOAbstHier): p2GOAbstHier;
+{ Called at initial allocation, or during dBoard resize, etc. }
+	var lev: TGraphLevel;
+	begin
+		if gH <> nil then
+			ClearAbstHier (gH)
+		else
+			begin
+				gH := p2GOAbstHier (newPtr (sizeof (TGOAbstHier)));
+				if gH = nil then
+					GOAbstHierError ('Out of memory.');
+				with gH^ do 
+					begin
+						DocumentInfo.dUpdateLevel := PointsGraphLevel; 
+						{ xxx also set in InitGOAbstHier ?? }
+						{ There are some interdependencies between InitGOAbstHier }
+						{ and InitDocInfo which might be cleaned up. }
+						for lev := PointsGraphLevel to 
+									succ(MaxSetLevel) do
+							case lev of
+								PointsGraphLevel:
+									InitGraph (	@PointGraph, 
+															PointsGraphLevel, 
+																@StringGraph, 
+																nil {bottom}, 
+															@CompPtState,
+															nil {no new points},
+															nil {no more points}, 
+															nil);
+								StringsGraphLevel:
+									InitGraph (	@StringGraph, 
+															StringsGraphLevel, 
+																@BlockGraph, 
+																@PointGraph, 
+															@CompStrState,
+															@CompNewStr,
+																{ xxx one size fits most for now: }
+															@MoreGONodes, 
+															@MoreGOArcs);
+								BlocksGraphLevel:
+									InitGraph (	@BlockGraph, 
+															BlocksGraphLevel, 
+																@GroupGraph, 
+																@StringGraph, 
+															@CompBlockState,
+															@CompNewBlock,
+															@MoreGONodes, 
+															@MoreGOArcs);
+								GroupsGraphLevel:
+									InitGraph (	@GroupGraph, 
+															GroupsGraphLevel, 
+																@AreaGraph, 
+																@BlockGraph, 
+															@CompGrpState,
+															@CompNewGrp,
+															@MoreGONodes, 
+															@MoreGOArcs);
+								AreasGraphLevel:
+									InitGraph (	@AreaGraph, 
+															AreasGraphLevel, 
+																nil {top}, 
+																@GroupGraph, 
+															@CompAreaState,
+															@CompAreaState {@CompNewArea},
+															@MoreGONodes, 
+															@MoreGOArcs);
+							end; {cases}
+					end;
+			end;
+		
+		with gH^, DocumentInfo do 
+			for lev := succ(dUpdateLevel) downto StringsGraphLevel do
+				case lev of
+					AreasGraphLevel:
+						AreaGraph.InitNode := AddNode (@AreaGraph, 0);
+					GroupsGraphLevel:
+						begin
+							GroupGraph.InitNode := AddNode (@GroupGraph, 0);
+							if GroupsGraphLevel <= dUpdateLevel then
+								AddElement (AreaGraph.InitNode, GroupGraph.InitNode);
+						end;
+					BlocksGraphLevel:
+						begin
+							BlockGraph.InitNode := AddNode (@BlockGraph, 0);
+							if BlocksGraphLevel <= dUpdateLevel then
+								AddElement (GroupGraph.InitNode, BlockGraph.InitNode);
+						end;
+					StringsGraphLevel:
+						begin
+							StringGraph.InitNode := AddNode (@StringGraph, 0);
+							if StringsGraphLevel <= dUpdateLevel then
+								AddElement (BlockGraph.InitNode, StringGraph.InitNode);
+						end;
+				end; { cases }
+		InitGOAbstHier := gH;
+	end; {InitGOAbstHier}
+
+procedure SetGOAbstHierLevel (gH: p2GOAbstHier; newLevel: TGraphLevel);
+{ Called to lower the updating level (prior to Invalidating Analyses) }
+{ and to raise the updating level (prior to Computing a move) }
+	var 
+		thisLevel: TGraphLevel; thisGraph: p2Graph; 
+		
+	procedure AddNodes (p: p2Node);
+		begin
+			p^.HighState := 0; { so later addition will not "find same" }
+			AddElement (thisGraph^.HighGraph^.InitNode, p);
+			RequestChange (thisGraph, p2GOPoint(p^.Child)); { Note: specific to StringGraph }
+		end; {AddNodes}
+		
+	procedure ClearNodes (p: p2Node);
+		begin
+			with p^ do
+				begin
+					Parent := nil;
+					Sibling := nil;
+					HighState := 0; { so later addition will not "find same" }
+				end; 
+		end; {ClearNodes}
+
+	begin {SetGOAbstHierLevel}
+		if (newLevel < PointsGraphLevel) or (newLevel > MaxSetLevel) then
+			begin
+				GOEngineError ('Bad call to SetGOAbstHierLevel: ', ord(newLevel), 1);
+				exit (SetGOAbstHierLevel);
+			end;
+		with gH^, DocumentInfo do
+			begin
+				if newLevel < dUpdateLevel then
+					begin { lower it }
+						repeat
+							thisLevel := dUpdateLevel;
+							case thisLevel of 
+								PointsGraphLevel:
+									thisGraph := @StringGraph;
+								StringsGraphLevel: 
+									thisGraph := @BlockGraph;
+								BlocksGraphLevel: 
+									thisGraph := @GroupGraph;
+								GroupsGraphLevel: 
+									thisGraph := @AreaGraph;
+							end; {cases}
+							if newLevel < thisLevel then
+								begin
+									ClearGraph (thisGraph);
+									thisGraph := thisGraph^.LowGraph;
+									EachGOGraphNode (thisGraph, ClearNodes);
+								end;
+							dUpdateLevel := pred(dUpdateLevel);
+						until newLevel = dUpdateLevel;
+					end
+				else if newLevel > dUpdateLevel then
+					begin { raise it }
+						for thisLevel := succ(newLevel) downto succ(succ(dUpdateLevel)) do
+							case thisLevel of
+								AreasGraphLevel:
+									AreaGraph.InitNode := AddNode (@AreaGraph, 0);
+								GroupsGraphLevel:
+									begin
+										GroupGraph.InitNode := AddNode (@GroupGraph, 0);
+										if GroupsGraphLevel <= newLevel then
+											AddElement (AreaGraph.InitNode, GroupGraph.InitNode);
+									end;
+								BlocksGraphLevel:
+									begin
+										BlockGraph.InitNode := AddNode (@BlockGraph, 0);
+										if BlocksGraphLevel <= newLevel then
+											AddElement (GroupGraph.InitNode, BlockGraph.InitNode);
+									end;
+								StringsGraphLevel:
+									begin
+										StringGraph.InitNode := AddNode (@StringGraph, 0);
+										if StringsGraphLevel <= newLevel then
+											AddElement (BlockGraph.InitNode, StringGraph.InitNode);
+									end;
+							end; { cases }
+						case dUpdateLevel of
+							PointsGraphLevel:
+								begin
+									thisGraph := @StringGraph;
+									EachGOGraphNode (thisGraph, AddNodes);
+									dUpdateLevel := newLevel;
+									CheckChanges (@DocumentInfo, thisGraph);
+								end;
+							StringsGraphLevel, BlocksGraphLevel:
+								begin
+									GOEngineError('SetGOAbstHierLevel not completed.', 0, 0);
+								end;
+						end; {case}
+					end;
+			end; {with gH...}
+	end; {SetGOAbstHierLevel}
+
+procedure EchHierNode (WhichLevel: ChunkList; nodSize: integer;
+		procedure Visit (ptrS: p2Node));
+	var chk: ChunkList; p: p2Node; i: integer;
+	begin
+		chk := WhichLevel;
+		while chk <> nil do
+			begin
+				p := pointer (ord4(chk)+4);
+				for i := 1 to NodeChunkSize do
+					begin
+						if p^.HighState <> ChunkFreeNode then
+							Visit (p);
+						p := pointer (ord4 (p) + nodSize);
+					end;
+				chk := chk^.nextChunk;
+			end;
+	end; {EchHierNode}
+
+procedure EachGOGraphNode (g: p2Graph; procedure Visit (p: p2Node));
+{ Visit each active node of graph g. }
+	var nodsize: integer;
+	begin
+		case g^.GraphLevel of
+			PointsGraphLevel:
+				GOEngineError ('Bad call to EachGOGraphNode', 0, 0);
+			StringsGraphLevel:
+				nodsize := sizeof (TNode);
+			BlocksGraphLevel:
+				nodsize := sizeof (TNode);
+			GroupsGraphLevel:
+				nodsize := sizeof (TNode);
+			AreasGraphLevel:
+				nodsize := sizeof (TNode);
+		end; {cases}
+		EchHierNode (g^.NodeChunckList, nodsize, Visit);
+	end; {EachGOGraphNode}
+	
+procedure EchHierArc (WhichLevel: ChunkList; nodSize: integer;
+		procedure Visit (ptrA: p2Arc));
+	var chk: ChunkList; p: p2Arc; i: integer;
+	begin
+		chk := WhichLevel;
+		while chk <> nil do
+			begin
+				p := pointer (ord4(chk)+4);
+				for i := 1 to ArcChunkSize do
+					begin
+						if p^.ImageCount <> ChunkFreeNode then
+							Visit (p);
+						p := pointer (ord4 (p) + nodSize);
+					end;
+				chk := chk^.nextChunk;
+			end;
+	end; {EchHierArc}
+	
+	
+	TYPE
+		TGOColor = (FreeTerrBlue, 
+						WStrSafeWhite, WStrL3LtPink, WStrL2MedPink, WStrL1BrtPink,
+						BStrSafeBlack, BStrL3DkRed, BStrL2DeepRed, BStrL1RubyRed);
+	Var
+		GOColors: array [FreeTerrBlue..BStrL1RubyRed] of RGBColor;
+
+	Procedure SetUpColors;
+		var TC: TGOColor;
+		begin
+			for TC := FreeTerrBlue to BStrL1RubyRed do
+				with GOColors [TC] do
+					case TC of
+						FreeTerrBlue:
+							begin
+								red := 0;
+								green := 0;
+								blue := 65535;
+							end;
+						WStrSafeWhite:
+							begin
+								red := 65535;
+								green := 65535;
+								blue := 65535;
+							end;
+						WStrL3LtPink:
+							begin
+								red := 65535;
+								green := 48000;
+								blue := 48000;
+							end;
+						WStrL2MedPink:
+							begin
+								red := 65535;
+								green := 32000;
+								blue := 32000;
+							end;
+						WStrL1BrtPink:
+							begin
+								red := 65535;
+								green := 16000;
+								blue := 16000;
+							end;
+						BStrSafeBlack:
+							begin
+								red := 0;
+								green := 0;
+								blue := 0;
+							end;
+						BStrL3DkRed:
+							begin
+								red := 20000;
+								green := 0;
+								blue := 0;
+							end;
+						BStrL2DeepRed:
+							begin
+								red := 36000;
+								green := 0;
+								blue := 0;
+							end;
+						BStrL1RubyRed:
+							begin
+								red := 50000;
+								green := 0;
+								blue := 0;
+							end;
+					end; {cases}
+		end; {SetUpColors}
+
+{$IFC DebugDraw}
+{$I DrawBlocks.p}
+{$ENDC}
+		
+
+{$IFC qTrace}{$D+}{$ENDC}
+function CompStrState (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+	label 1; { Space optimization, some common code for B/W Stones }
+	var 
+		LowS: PointHighState;
+		HighS: StringHighState;
+		tempAnalysis : p2Analysis;
+		BlkAdj, WhtAdj: integer;
+		
+	procedure CountNonDeadStrings (p2: p2Node);
+		var p2LowS: PointHighState;
+
+		begin
+			with p2^ do
+				begin
+					p2LowS.PtStateInt := LowState;
+					if (p2LowS.PtOcc = BlackOcc) or (p2LowS.PtOcc = WhiteOcc) then
+						with p2GOPoint(Child)^ do
+							if AnalysisResult <> nil then
+								begin
+									if (AnalysisResult^.result <> Dead) and 
+												(AnalysisResult^.result <> CanKillCanLive) then
+										begin
+											if p2LowS.PtOcc = BlackOcc then
+												BlkAdj := BlkAdj +1
+											else
+												WhtAdj := WhtAdj +1;
+										end
+									else
+										begin
+											{$IFC TraceMakeLife}
+											writeln ('Liberty String Adjacent to a dead stone ');
+											write ('Liberty is ');
+											PrintPointItem (p^.Child);
+											write (' Dead Stone is ');
+											PrintPointItem (Child);
+											writeln;
+											{$ENDC}
+										end;
+								end
+							else
+								begin
+									if p2LowS.PtOcc = BlackOcc then
+										BlkAdj := BlkAdj +1
+									else
+										WhtAdj := WhtAdj +1;
+								end;
+				end;
+		end; {CountNonDeadStrings}
+		
+	begin {CompStrState}
+		HighS.StrStateInt := 0;
+		LowS.PtStateInt := p^.LowState;
+		case LowS.PtOcc of
+			LibertyOcc:
+				begin
+					BlkAdj := 0; WhtAdj := 0;
+					EachAdjNode (p, CountNonDeadStrings);
+					if BlkAdj = 0 then
+						HighS.StrTyp := WhtLibStr
+					else if WhtAdj = 0 then
+						HighS.StrTyp := BlkLibStr
+					else
+						HighS.StrTyp := JntLibStr;
+				end;
+			BlackOcc:
+				begin
+					HighS.StrTyp := BlackStonesStr;
+					goto 1;
+				end;
+			WhiteOcc:
+				begin
+					HighS.StrTyp := WhiteStonesStr;
+	1:
+					{Done for both StoneStrings.}
+					tempAnalysis := p2GOPoint(p^.Child)^.AnalysisResult;
+					if tempAnalysis <> nil then
+						{Now we assume that all analysis is current.}
+							if (tempAnalysis^.Result = Dead) or 
+									(tempAnalysis^.Result = CanKillCanLive) then
+								begin
+									HighS.StrStateInt := 0;
+									if LowS.PtOcc = BlackOcc then
+										HighS.StrTyp := WhtLibStr
+									else
+										HighS.StrTyp := BlkLibStr;
+									{$IFC TraceMakeLife}
+									write ('Coloring Dead String as Liberty :');
+									PrintPointItem (p^.Child);
+									writeln;
+									{$ENDC}
+								end;
+				end;
+			UnOcc:
+				with pDoc^ do
+					case LowS.Lin2 of
+						CornerLine:
+							HighS.StrTyp := CornerTerrStr;
+						MidLine: { Big boards only }
+							if LowS.Lin1 <= dHoshiLine then
+								HighS.StrTyp := CornDevTerrStr
+							else 
+								HighS.StrTyp := CornInfTerrStr;
+						EdgeLine:
+							if LowS.Lin1 <= dHoshiLine then
+								HighS.StrTyp := EdgeTerrStr
+							else if LowS.Lin1 >= dMidPt-1 then
+								HighS.StrTyp := CenterTerrStr
+							else
+								HighS.StrTyp := EdgeDevTerrStr;
+						otherwise { note: Lin1 = Lin2 }
+							if LowS.Lin1 <= dHoshiLine then
+								HighS.StrTyp := CornerTerrStr
+							else if LowS.Lin1 >= dMidPt-1 then
+								HighS.StrTyp := CenterTerrStr
+							else
+								HighS.StrTyp := CornInfTerrStr
+					end;
+		end; { case LowS.PtOcc }
+		CompStrState := HighS.StrStateInt;
+	end; {CompStrState}
+
+function CompNewStr (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+	var 
+		LowS: PointHighState;
+		HighS: StringHighState;
+	begin
+		HighS.StrStateInt := 0;
+		LowS.PtStateInt := p^.LowState;
+		case LowS.PtOcc of
+			LibertyOcc:
+				HighS.StrTyp := JntLibStr;
+			BlackOcc:
+				HighS.StrTyp := BlackStonesStr;
+			WhiteOcc:
+				HighS.StrTyp := WhiteStonesStr;
+			UnOcc:
+				with pDoc^ do
+					case LowS.Lin2 of
+						CornerLine:
+							HighS.StrTyp := CornerTerrStr;
+						MidLine: { Big boards only }
+							if LowS.Lin1 <= dHoshiLine then
+								HighS.StrTyp := CornDevTerrStr
+							else 
+								HighS.StrTyp := CornInfTerrStr;
+						EdgeLine:
+							if LowS.Lin1 <= dHoshiLine then
+								HighS.StrTyp := EdgeTerrStr
+							else if LowS.Lin1 >= dMidPt-1 then
+								HighS.StrTyp := CenterTerrStr
+							else
+								HighS.StrTyp := EdgeDevTerrStr;
+						otherwise { note: Lin1 = Lin2 }
+							if LowS.Lin1 <= dHoshiLine then
+								HighS.StrTyp := CornerTerrStr
+							else if LowS.Lin1 >= dMidPt-1 then
+								HighS.StrTyp := CenterTerrStr
+							else
+								HighS.StrTyp := CornInfTerrStr
+					end;
+		end; { case LowS.PtOcc }
+		CompNewStr := HighS.StrStateInt;
+	end; {CompNewStr}
+
+{---------------------------------------------------------------------------------
+We will color together:
+	small territory strings into larger blocks.
+	strings and liberties of each color.
+---------------------------------------------------------------------------------}
+function CompBlockState (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+
+	var
+		LowS : StringHighState;
+		HighS : BlockHighState;
+		ChildLowS: PointHighState;
+		
+	begin {CompBlockState}
+		LowS.StrStateInt := p^.LowState;
+		HighS.BlockStateInt := 0;
+		case LowS.StrTyp of
+			JntLibStr:
+				HighS.BlockTyp := DisputedGroup;
+			BlkLibStr, BlackStonesStr: 
+				HighS.BlockTyp := BlackGroup;
+			WhtLibStr, WhiteStonesStr: 
+				HighS.BlockTyp := WhiteGroup;
+			CornerTerrStr:
+				HighS.BlockTyp := CornerTerrBlock;
+			CornInfTerrStr, CornDevTerrStr:
+				HighS.BlockTyp := CornerDevBlock;
+			EdgeTerrStr, EdgeDevTerrStr:
+				HighS.BlockTyp := EdgeTerrBlock;
+			CenterTerrStr:
+				HighS.BlockTyp := MidTerrBlock;
+		end; {cases}
+		CompBlockState := HighS.BlockStateInt;
+	end; {CompBlockState}
+	
+function CompNewBlock   (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+	var
+		LowS: StringHighState;
+		HighS: BlockHighState;
+		ChildLowS: PointHighState;
+	begin
+		LowS.StrStateInt := p^.LowState;
+		HighS.BlockStateInt := 0;
+		case LowS.StrTyp of
+			JntLibStr:
+				HighS.BlockTyp := DisputedGroup;
+			BlkLibStr, BlackStonesStr: 
+				HighS.BlockTyp := BlackGroup;
+			WhtLibStr, WhiteStonesStr: 
+				HighS.BlockTyp := WhiteGroup;
+			CornerTerrStr:
+				HighS.BlockTyp := CornerTerrBlock;
+			CornInfTerrStr, CornDevTerrStr:
+				HighS.BlockTyp := CornerDevBlock;
+			EdgeTerrStr, EdgeDevTerrStr:
+				HighS.BlockTyp := EdgeTerrBlock;
+			CenterTerrStr:
+				HighS.BlockTyp := MidTerrBlock;
+		end; {cases}
+		CompNewBlock := HighS.BlockStateInt;
+	end; {CompNewBlock}
+	
+function CompGrpState (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+	var
+		LowS : BlockHighState;
+		HighS : GroupHighState;
+		WhiteAdj, BlackAdj : boolean;
+		
+		procedure TestAdjGrps (AdjGrp : p2Node);
+			var
+				AdjLowS : BlockHighState;
+			begin
+				AdjLowS.BlockStateInt := AdjGrp^.LowState;
+				if AdjLowS.BlockTyp = BlackGroup then
+					BlackAdj := true
+				else if AdjLowS.BlockTyp = WhiteGroup then
+					WhiteAdj := true;
+			end;
+		  
+	begin {CompBlockState}
+		LowS.BlockStateInt := p^.LowState;
+		HighS.GroupStateInt := 0;
+		case LowS.BlockTyp of
+			DisputedGroup: 
+				HighS.GroupTyp := DisputedArea;
+			BlackGroup: 
+				HighS.GroupTyp := BlackArea;
+			WhiteGroup:
+				HighS.GroupTyp := WhiteArea;
+			CornerTerrBlock, CornerDevBlock, EdgeTerrBlock, MidTerrBlock:
+				begin
+					WhiteAdj := false;
+					BlackAdj := false;
+					EachAdjNode (p, TestAdjGrps);
+					if WhiteAdj and BlackAdj then
+						HighS.GroupTyp := DisputedArea
+					else if WhiteAdj then
+						HighS.GroupTyp := WhiteArea
+					else if BlackAdj then
+						HighS.GroupTyp := BlackArea
+					else
+						HighS.GroupTyp := OpenArea;
+				end;
+		end; {cases}
+		CompGrpState := HighS.GroupStateInt;
+	end; {CompGrpState}
+
+function CompNewGrp (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+var 	LowS : BlockHighState;
+		HighS : GroupHighState;
+	begin
+		LowS.BlockStateInt := p^.LowState;
+		HighS.GroupStateInt := 0;
+		case LowS.BlockTyp of
+			DisputedGroup: 
+				HighS.GroupTyp := DisputedArea;
+			BlackGroup: 
+				HighS.GroupTyp := BlackArea;
+			WhiteGroup:
+				HighS.GroupTyp := WhiteArea;
+			CornerTerrBlock, CornerDevBlock, EdgeTerrBlock, MidTerrBlock:
+				HighS.GroupTyp := OpenArea;
+		end; {cases}
+		CompNewGrp := HighS.GroupStateInt;
+	end; {CompNewGrp}
+
+function CompAreaState (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+	begin 
+		CompAreaState := 1; {???}
+	end; {CompAreaState}
+
+function CompNewArea(pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+	begin 
+		CompNewArea := 1;
+	end; {CompNewArea}

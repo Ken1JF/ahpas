@@ -1,0 +1,3527 @@
+{ Implementation of GOMover
+
+	AUTHORS
+			Ken Friedenbach and Arthur Molin			
+			Copyright 1986-1988
+			All Rights Reserved.
+
+}
+
+{$SETC DebugGroupLists := false}
+
+{$S GOMover}
+{$IFC qTrace}{$D++}{$ENDC}
+
+const
+{$IFC TraceConnects}
+	TraceCutConnect = true;
+{$ELSEC}
+	TraceCutConnect = false;
+{$ENDC}
+
+const 
+	KillStrategy = true; 
+		{ xxx should be an enumerated type/or const at point where parameter defined. }
+	
+		{ Some constants shared by DoCutConnectPoints and DoCutConnectStrings }
+	OPPONENT_NEAR_BONUS = 3; { bonus for making "loose" connection near an opponent. HACK! }
+	LEAVE_CUT_BONUS = 1; { bonus for saving stones near a cut point. HACK! }
+	CRITICAL_KILL_SAVE = 5; {was 7}
+
+function RandomizeMoves (gH: p2GOAbstHier; var RecommendedMoves: MoveScoreCard; 
+															moveValue : integer) : p2Analysis;
+	var
+		tempList : p2ListItem;
+		NumItems : integer;
+		Nth, i : integer;
+		tempMoves : p2Analysis;
+	begin
+		with gH^, DocumentInfo do
+			begin
+				NumItems := StackSize (RecommendedMoves [moveValue]);
+				if NumItems = 0 then
+					GOEngineError ('Empty List In Randomize Moves', 0, 0)
+				else if (NumItems = 1) or (dNextMove < 2) then
+					RandomizeMoves := p2Analysis (Pop (@PointGraph, RecommendedMoves [moveValue]))
+				else
+					begin
+						Nth := (dGameRecord[dNextMove - 1].MovePoint^.XCoord * 19 
+										+ dGameRecord[dNextMove - 1].MovePoint^.YCoord) mod NumItems;
+						tempList := RecommendedMoves [moveValue];
+						for i := 0 to Nth do
+							tempList := tempList^.NextListItem;
+						tempMoves := p2Analysis (tempList^.ListItem);
+						Delete(@PointGraph, p2Node(tempMoves), RecommendedMoves [moveValue]);
+						RandomizeMoves := tempMoves;
+					end;
+			end;
+	end; {RandomizeMoves}
+
+function TestSafe (gH: p2GOAbstHier; MovePnt : p2GOPoint; testSafety: Boolean) : boolean;
+	{ This function will test a move to see that it is legal and }
+	{ safe.  (Or at least not CanKillCanSave or Dead) }
+	{ If it is it will return true else false. }
+	var
+		atPt : Point;
+		LegalMove : integer;
+		tempAnal : p2Analysis;
+	begin
+		TestSafe := true;
+		LegalMove := TryMakeMove (gH, atPt, false, MovePnt,
+							 true{placePoint is known}, false {temporary});
+		if LegalMove = 0 then
+			begin
+				{ xxx Should this be StringStatus ??? }
+				if testSafety then
+					begin
+						tempAnal := StringStatus (gH, MovePnt, DEPTH_OF_SEARCH, SEARCH_NODE_LIMIT, false,
+									KillWithLadder, RunFromLadder, LadderBroken);
+						if tempAnal <> nil then
+							begin
+								if (tempAnal^.result = Safe) or (tempAnal^.result = Snapback) then
+										{ xxx later, allow starting of KO. }
+									begin
+										{$IFC TraceMove}
+										if TraceMakeMoves then
+											begin
+												write(' is safe: ');
+												writeStringStatus (tempAnal^.result);
+											end;
+										{$ENDC}
+										TestSafe := true;
+									end
+								else
+									begin
+										{$IFC TraceMove}
+										if TraceMakeMoves then
+											begin
+												write(' is unsafe: ');
+												writeStringStatus (tempAnal^.result);
+											end;
+										{$ENDC}
+										TestSafe := false;
+									end; {if (tempAnal^.result = Safe)}
+								ReturnAnalysis ( @gH^.PointGraph, tempAnal );
+							end {if tempAnal <> nil}
+						else
+							begin
+								if TraceMakeMoves then
+									writeln ('StringStatus returns nil to TestSafe!');
+								TestSafe := false;
+							end;
+					end;
+				UnMakeMove(gH);
+			end { if LegalMove = 0 then }
+		else
+			begin
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					writeln(' Illegal move: ', LegalMove);
+				{$ENDC}
+				TestSafe := false;
+			end;
+	end; {TestSafe}
+
+function NumGrpStoneStr (g : p2Node) : integer;
+	{ Returns the number of Stone Strings in a group. }
+	var n : integer;
+	procedure CountBlkStr (b : p2Node);
+		var
+			lowS : StringHighState;
+		begin
+			lowS.StrStateInt := b^.LowState;
+			if (lowS.StrTyp = BlackStonesStr) or (lowS.StrTyp = WhiteStonesStr) then
+				n := n + 1;
+				{ Trick : StoneStrings are not collapsed in step from Strings to Blocks. }
+		end;
+	begin
+		n := 0;
+		EachElement (g, CountBlkStr);
+		NumGrpStoneStr := n;
+	end;
+	
+function NumGrpPoints (g: P2Node): integer;
+	{ Given a group, counts the number of Points in the group. }
+	var n: integer;
+	
+	procedure CountBlkPoints (b: p2Node);
+		begin
+			n := n + NumBlkPoints (b);
+		end; {CountStrPoints}
+		
+	begin {NumGrpPoints}
+		n := 0;
+		EachElement (g, CountBlkPoints);
+		NumGrpPoints := n;
+	end; {NumGrpPoints}
+
+(* *** Counts all the friendly stones in a group *** *)
+
+var
+	CountingStrColor: TStringType;
+	
+function NumBlkStones (b: P2Node): integer;
+	{ Given a block, counts the number of Stones in the block }
+	var n: integer;
+	
+	procedure CountStrStones (s: p2Node);
+		var highS: StringHighState;
+		begin
+			highS.StrStateInt := s^.HighState;
+			if highS.StrTyp = CountingStrColor then
+				n := n + NumElements (s);
+		end; {CountStrStones}
+		
+	begin {NumBlkStones}
+		n := 0;
+		EachElement (b, CountStrStones);
+		NumBlkStones := n;
+	end; {NumBlkStones}
+			
+function NumGrpStones (g: P2Node): integer;
+	{ Given a group, counts the number of Stones in the group. }
+	var n: integer;
+	
+	procedure CountBlkStones (b: p2Node);
+		begin
+			n := n + NumBlkStones (b);
+		end; {CountStrStones}
+		
+	begin {NumGrpStones}
+		n := 0;
+		EachElement (g, CountBlkStones);
+		NumGrpStones := n;
+	end; {NumGrpStones}
+	
+(* *** counts the groups surrounding a point *** *)
+procedure CountStrGroups (gH: p2GOAbstHier; aString { or aPoint!}: p2Node;
+		var BlkCount, WhtCount: integer; 
+			{ number of Blk and White groups adj to (and including) a Str }
+		var nBlkPoints, nWhtPoints: integer;
+			{ number of points in the Black and White groups }
+		DoPointLevel: Boolean
+			{ to distinguish each "adjPoint" from each "adjString" levels of counting }
+		{proceudure Visit (aGroup or aPoint);??} );
+	
+	var	{ temporary (group) node lists: }
+		blkGroups, whtGroups: p2ListItem;
+	
+	procedure CheckGroup (adjStr: p2Node);
+		var adjGrp: p2Node; lowS: BlockHighState;
+		begin
+			adjGrp := adjStr^.Parent^.Parent;
+			lowS.BlockStateInt := adjGrp^.LowState;
+			case lowS.BlockTyp of
+				BlackGroup:
+					if PushUnique (@gH^.PointGraph, blkGroups, adjGrp) then
+						nBlkPoints := nBlkPoints + NumGrpPoints (adjGrp);
+				WhiteGroup:
+					if PushUnique (@gH^.PointGraph, whtGroups, adjGrp) then
+						nWhtPoints := nWhtPoints + NumGrpPoints (adjGrp);
+			end; {cases}
+		end; {CheckGroup}
+		
+	procedure CallCheckGroup (pDoc: p2DocInfo; p2: p2GOPoint);
+		begin
+			CheckGroup (p2^.PtNode);
+		end; {CallCheckGroup}
+
+	begin {CountStrGroups}
+		blkGroups := nil; nBlkPoints := 0;
+		whtGroups := nil; nWhtPoints := 0;
+		if DoPointLevel then
+			begin
+				CheckGroup (p2GOPoint(aString)^.PtNode); { include the point }
+				EachAdjPoint (@gH^.DocumentInfo, p2GOPoint(aString), CallCheckGroup);
+			end
+		else
+			begin
+				CheckGroup (aString); { include the point }
+				EachAdjNode (aString, CheckGroup);
+			end;
+		
+		BlkCount := StackSize (BlkGroups);
+		WhtCount := StackSize (WhtGroups);
+
+		{$IFC TraceMove}
+		write(' Black Groups: ', BlkCount:2, 
+			  ' # Points: ', nBlkPoints:2,
+			  '; White Groups: ', WhtCount:2, 
+			  ' # Points: ', nWhtPoints:2);
+		writeln;
+		{$ENDC}
+
+		(* ***
+			is further evaluation needed: ??
+			xxx should the groups be checked for dead/alive? (not currently recorded)
+			do we want to convert group pointers to representative points: ??
+		ListColor := BlackOcc;
+		PopEach (@gH^.PointGraph, BlkGroups, FurtherEvaluation);
+		ListColor := WhiteOcc;
+		PopEach (@gH^.PointGraph, WhtGroups, FurtherEvaluation);
+		*** *)
+		
+		{ these are lists of actual Group nodes, 
+			so can't hold across dynamic routines like StringStatus }
+		ReturnToAvailList (@gH^.PointGraph, blkGroups);
+		ReturnToAvailList (@gH^.PointGraph, whtGroups);
+
+	end; {CountStrGroups}
+
+function EvaluateCapture (gH: p2GOAbstHier; TargetStrPt, MoveStrPt, DefendStrPt: p2GOPoint
+		{proceudure Visit (aGroup or aPoint);??} ): integer;
+		{ Called to evaluate captures and defending moves. }
+		{ Inserts minimum passes to do evaluation, i.e. preserves Ko state for Legal Checking }
+	var
+		MoveValue: integer; {shared variable}
+		SaveList: p2ListItem;
+		
+	procedure AddSaves (p2: p2Node);
+		{ add directly the value of saved strings }
+		var aPt: p2GOPoint;
+		begin
+			aPt := p2GOPoint(p2^.Child);
+			with aPt^ do
+				if AnalysisResult <> nil then
+					with AnalysisResult^ do
+						if result = CanKillCanLive then { xxx or <> Safe ??}
+							if PushUnique (@gH^.PointGraph, SaveList, p2) then
+								MoveValue := MoveValue + 
+										2 * NumElements (p2) + (NumLiberties (p2) -1);
+		end; {AddSaves}
+		
+	var
+		CutColor: TOccStatus;
+		
+	procedure AddCuts (p2: p2Node);
+		{ after capturing or saving, add a BONUS for leaving potential cut points behind }
+		begin
+			if p2GOPoint(p2^.Child)^.OccStatus = CutColor then
+				if NumLiberties (p2) <= 2 then
+					MoveValue := MoveValue + LEAVE_CUT_BONUS;
+		end; {AddCuts}
+	
+	var
+		SecondLib: p2GOPoint;
+		
+	procedure FindLib (LibNode : P2Node);
+		var s: PointHighState;
+			begin
+			s.PtStateInt := LibNode^.LowState;
+				if s.PtOcc >= UnOcc then 
+					 SecondLib := p2GOPoint(LibNode^.Child);
+		end; {FindLib}
+			
+	var
+		atPt: Point;
+		LegalMove: integer;
+
+		MadeSecondMove: Boolean;
+		GroupsGained: integer;
+
+			{ initial status variables: }
+		initBlkPoints, initWhtPoints: integer;
+		initBlkCount,  initWhtCount: integer;
+		
+			{ after capture status variables: }
+		capBlkPoints, capWhtPoints: integer;
+		capBlkCount,  capWhtCount: integer;
+		
+			{ after capture status variables: }
+		conBlkPoints, conWhtPoints: integer;
+		conBlkCount,  conWhtCount: integer;
+
+		targColor: TOccStatus;
+		PassPt: p2GOPoint; { nil, var parameter for TryMakeMove}
+		OnMove: Boolean; { if true, 
+													this a Kill Opponent evaluation,
+													 extra "pass" is to evaluate allowing Opponent to defend
+											 if false,
+											 		this is a Friend Save evaluation,
+													extra "pass is neede to evaluate Opponent attack. }
+		
+	begin {EvaluateCapture}
+	
+		targColor := TargetStrPt^.OccStatus; { before it goes away! }
+		
+			{ the basic move value: }
+		PassPt := nil;
+		MoveValue := 0;
+		SaveList := nil;
+		AddSaves (TargetStrPt^.PtNode);
+		EachAdjNode (TargetStrPt^.PtNode, AddSaves);
+		SaveList := nil;
+		if MoveStrPt <> nil then
+			EachAdjNode (MoveStrPt^.PtNode, AddSaves);
+		ReturnToAvailList (@gH^.PointGraph, SaveList);
+		{$IFC TraceMove}
+		write ('Initial Groups: ');
+		{$ENDC}
+		CountStrGroups (gH, TargetStrPt^.PtNode, 
+				initBlkCount, initWhtCount, initBlkPoints, initWhtPoints, false);
+				
+		with gH^, DocumentInfo do
+			begin
+				OnMove := (dBlackToPlay = (targColor = WhiteOcc));
+						{ Black to play with White target, or vice versa }
+						
+				if not OnMove then { Pass }
+					LegalMove := TryMakeMove (gH, atPt, false, PassPt {pass}, true,
+														false {temporary});
+					
+				LegalMove := TryMakeMove (gH, atPt, false, MoveStrPt,
+									 true{placePoint is known}, false {temporary});
+				SecondLib := nil;
+				if LegalMove = 0 then
+					begin
+						MadeSecondMove := false;
+						if TargetStrPt^.OccStatus <> UnOcc then
+							begin
+								EachAdjNode (TargetStrPt^.PtNode, FindLib);
+								if SecondLib <> nil then
+									begin
+											{ Pass }
+										LegalMove := TryMakeMove (gH, atPt, false, PassPt {pass}, true,
+														false {temporary});
+											{ Make a second move }
+										LegalMove := TryMakeMove (gH, atPt, false, SecondLib,
+															 true{placePoint is known}, false {temporary});
+										if LegalMove <> 0 then
+											begin
+												{The string is dead, but can't be captured in two moves.
+												 Can occur in Ko situations.}
+											end
+										else
+											MadeSecondMove := true; { remember for later }
+									end; {SecondLib <> nil}
+							end; {if TargetStrPt^.OccStatus <> UnOcc}
+							
+						{$IFC TraceMove}
+						write ('After capture: ');
+						{$ENDC}
+						CountStrGroups (gH, TargetStrPt^.PtNode, 
+								capBlkCount, capWhtCount, capBlkPoints, capWhtPoints, false);
+						
+							{ it is good to make fewer of your groups, and more of the opponent's }
+						
+						if targColor = BlackOcc then
+							begin { White is playing to Capture Black }
+								capWhtCount := initWhtCount - capWhtCount; { expect fewer, but... }
+								if capWhtCount < 0 then capWhtCount := 0;
+								capBlkCount := capBlkCount - initBlkCount; { xxx -1 for sole str capture? }
+								if capBlkCount < 0 then capBlkCount := 0;
+								CutColor := BlackOcc; { for first cut analysis }
+							end
+						else
+							begin { Black is playing to Capture White }
+								capBlkCount := initBlkCount - capBlkCount; { expect fewer, but... }
+								if capBlkCount < 0 then capBlkCount := 0;
+								capWhtCount := capWhtCount - initWhtCount; { xxx -1 for sole str capture? }
+								if capWhtCount < 0 then capWhtCount := 0;
+								CutColor := WhiteOcc;
+							end;
+							
+						if MoveStrPt <> nil then
+							EachAdjNode (MoveStrPt^.PtNode, AddCuts);
+						
+						if CutColor = BlackOcc then CutColor := WhiteOcc
+						else CutColor := BlackOcc; { for second cut analysis }
+						
+						GroupsGained := capWhtCount + capBlkCount;
+						
+						if GroupsGained > 0 then { xxx be more accurate? min. over members of string }
+							case TargetStrPt^.Line of
+								1: MoveValue := 
+									MoveValue + GroupsGained*8;
+								2,3: MoveValue := 
+									MoveValue + GroupsGained*10;
+								otherwise
+									MoveValue := 
+										MoveValue + GroupsGained*13;
+							end;
+							
+						if SecondLib <> nil then
+							begin
+								if MadeSecondMove then
+									UnMakeMove (gH); { undo second move, if it was done }
+								UnMakeMove (gH); { undo pass, if it was done. }
+							end;
+			
+						UnMakeMove(gH); { undo first move }
+						
+						if not OnMove then { Pass }
+							UnMakeMove (gH); { undo pass, if it was done. }
+						
+							{ evaluate the Connect?? }
+						if OnMove then { Pass needed to defend }
+							LegalMove := TryMakeMove (gH, atPt, false, PassPt {pass}, true,
+														false {temporary});
+							
+							{ Make the defensive move: }
+						LegalMove := TryMakeMove (gH, atPt, false, DefendStrPt,
+								true{placePoint is known}, false {temporary}); { let defender defend }
+						if LegalMove = 0 then
+							begin
+								{$IFC TraceMove}
+								write ('After Connect Groups: ');
+								{$ENDC}
+								CountStrGroups (gH, TargetStrPt^.PtNode, 
+										conBlkCount, conWhtCount, conBlkPoints, conWhtPoints, false);
+										
+								if targColor = BlackOcc then
+									begin { White is playing to Capture Black }
+										conWhtCount := initWhtCount - conWhtCount; { expect fewer, but... }
+										if conWhtCount < 0 then conWhtCount := 0;
+										conBlkCount := conBlkCount - initBlkCount; { xxx -1 for sole str capture? }
+										if conBlkCount < 0 then conBlkCount := 0;
+									end
+								else
+									begin { Black is playing to Capture White }
+										conBlkCount := initBlkCount - conBlkCount; { expect fewer, but... }
+										if conBlkCount < 0 then conBlkCount := 0;
+										conWhtCount := conWhtCount - initWhtCount; { xxx -1 for sole str capture? }
+										if conWhtCount < 0 then conWhtCount := 0;
+									end;
+		
+								GroupsGained := conWhtCount + conBlkCount;
+								
+								if GroupsGained > 0 then { xxx be more accurate? min. over members of string }
+									case TargetStrPt^.Line of
+										1: MoveValue := 
+											MoveValue + GroupsGained*8;
+										2,3: MoveValue := 
+											MoveValue + GroupsGained*10;
+										otherwise
+											MoveValue := 
+												MoveValue + GroupsGained*13;
+									end;
+									
+								if MoveStrPt <> nil then
+									EachAdjNode (MoveStrPt^.PtNode, AddCuts);
+								
+								UnMakeMove (gH); { the Defensive move }
+							end; {if LegalMove = 0}
+							
+						if OnMove then { Pass needed to defend }
+							UnMakeMove (gH); { undo pass, if it was done. }
+
+					end { if LegalMove = 0 }
+				else
+					GOEngineError ('Illegal Opponent kill move ', LegalMove, 1); ;
+			end; {with gH^, DocumentInfo}
+
+		EvaluateCapture := MoveValue;
+	end; {EvaluateCapture}
+
+function EvaluateHane (str : p2Node; CompHane : boolean) : integer;
+	{ EvaluateHane is passed the String of the Liberty that the }
+	{ Hane move is going to take. }
+	{ CompHane is true if this is a hane against an opponent's string. }
+	var
+		WeakestAdj : integer;
+	procedure CountAdjNode (adjStr : p2Node);
+		var
+			nE : integer;
+		begin
+			nE := numElements (adjStr);
+			if nE < WeakestAdj then
+				WeakestAdj := nE;
+		end;
+	begin {EvaluateHane}
+		WeakestAdj := 100;
+		EachAdjNode (str, CountAdjNode);
+		if CompHane then
+			if WeakestAdj > 3 then
+				EvaluateHane := 3
+			else if WeakestAdj > 1 then
+				EvaluateHane := 4
+			else EvaluateHane := 5
+		else
+			if WeakestAdj > 3 then
+				EvaluateHane := 1
+			else if WeakestAdj > 1 then
+				EvaluateHane := 2
+			else EvaluateHane := 3;
+	end; {EvaluateHane}
+	
+var 
+	MaxKillSaveMove: integer;
+	ComputerColor: TOccStatus;
+	
+	FriendGroupCount, OpponentGroupCount: integer;
+	TargetGroupMin, TargetGroupMax: integer;
+	NewFriendValue, NewEnemyValue, 
+	FewerFriendsValue, FewerEnemiesValue: integer;
+	
+procedure ExtensionMove (gH : p2GoAbstHier; var TheMoves: MoveScoreCard);
+	
+	procedure CallExtend (Grp : p2Node);
+		var LowS : BlockHighState;
+			tempAnal: p2Analysis; MoveValue: integer;
+		begin
+			tempAnal := nil;
+			LowS.BlockStateInt := Grp^.LowState;
+			if ( (LowS.BlockTyp = BlackGroup) and (ComputerColor = BlackOcc) )
+				or ( (LowS.BlockTyp = WhiteGroup) and (ComputerColor = WhiteOcc) ) then
+				{xxx if this is a better move than tempReturn then...}
+				tempAnal := ExtendOff (gH, Grp, false);
+			if tempAnal <> nil then
+				begin
+					{ xxx what about illegal moves? }
+					{ impossible to get an illegal move from ExtendOff }
+					MoveValue := tempAnal^.result; 
+					if MoveValue < 0 then
+						MoveValue := 0;
+					if (MaxKillSaveMove < 3) or (MoveValue < MaxKillSaveMove) then
+						begin
+							tempAnal^.result := ExtendMoveAnal;
+							{$IFC TraceMove}
+							if TraceMakeMoves then
+								begin
+									write ('Extend move: with value: ', MoveValue:1);
+									write (' Move is ');
+									PrintPointItem (tempAnal^.target );
+									if tempAnal^.attackTree <> nil then 
+										write (' attackTree <> nil');
+									if tempAnal^.defendTree <> nil then 
+										write (' defendTree <> nil');
+									writeln;
+								end;
+							{$ENDC}
+							Push (@gH^.PointGraph, TheMoves [MoveValue], 
+										p2Node(tempAnal));
+						end
+					else
+						ReturnAnalysis (@gH^.PointGraph, tempAnal);
+				end;
+		end; {CallExtend}
+		
+	begin
+		{ could filter with ClassifyGroup, building a list }
+		EachGOGraphNode (@gH^.GroupGraph, CallExtend);
+	end; {ExtensionMove}
+
+var
+	InOpeningStages: Boolean; { first attempt at recognizing "stages" of a game }
+														{ Set in ComputeMove, used in JosekiMove and CutConnect }
+	NumEmptyEdge: integer; { now used to control Cut/Connect analysis }
+	NumActiveJoseki: integer;
+	
+	FIRST_PLAY_IN_CORNER: integer;
+	CONTINUE_NO_TENUKI: integer;
+	EXTEND_ONE_STONE: integer;
+		OCCUPY_EMPTY_EDGE: integer;
+	AFTER_NO_TENUKI: integer;
+	CONTINUE_OR_TENUKI:integer;
+	
+procedure JosekiMove (gH: p2GOAbstHier; var TheMoves: MoveScoreCard; DoDevelopment: Boolean);
+	var
+		NumAtBegin: integer; { xxx later, add a DocumentInfo state variable, to short circuit tests }
+		NumOneStoneGroups: integer;
+		
+	procedure FindJosekiMoves (var JTree: TJosekiControl; 
+						corn: integer; isReflect: Boolean);		
+		var 
+			x,y : integer; FoundTenuki: Boolean;
+
+		procedure FindMove (t: p2TreeNode);
+			var p: p2JosekiTreeNode;
+				tmpx, tmpx2, tmpy, tmpy2: integer;
+			begin
+				p := p2JosekiTreeNode(t);
+				with p^ do
+					if value <> BadJosekiMove then
+						begin
+							tmpx := tree.TreeMoveX;
+							tmpy := tree.TreeMoveY;
+							if tmpx = 0 then
+								FoundTenuki := true
+							else
+								begin
+									if InverseJosekiTransform (@gH^.DocumentInfo,
+										isReflect, corn, tmpx, tmpy, tmpx2, tmpy2) then
+										{ InverseJosekiTransform sets tmpx2, tmpy2 }
+									else
+										begin
+											tmpx2 := 0;
+											tmpy2 := 0;
+											{ xxx do we need to communicate the difference between }
+											{ a 'pass' on the tree, and a tranformation off the board? }
+											{ Don't think so, we are only interested in "active" moves here }
+										end;
+									if (x=0) then {xxx later: randomize??}
+										begin
+											x := tmpx2;
+											y := tmpy2;
+										end;
+								end;
+						end
+					else
+						begin
+							{ xxx do something with bad Joseki??}
+						end;
+			end; {FindMove}
+			
+		var 
+			JosekiStrPt : p2GOPoint;
+			LegalMove : integer;
+			Status : p2Analysis;
+			atPt : Point;  {Dummy for TryMakeMove}
+			MoveValue: integer;
+			tempAnal: p2Analysis;
+			
+		begin {FindJosekiMoves}
+			x := 0;
+			NumActiveJoseki := NumActiveJoseki + 1;
+			FoundTenuki := false;
+			with JTree do
+				case JosekiState of
+					AtBegin: {occupy an unoccupied corner}
+						begin
+							NumAtBegin := NumAtBegin+1;
+							MoveValue := FIRST_PLAY_IN_CORNER;
+							{ xxx later: get from Joseki Tree }
+							ForEachChild (@JosekiTree^.tree, FindMove);
+						end;
+					OnCurr:	{then continue a main Joseki}
+						begin
+							{ xxx later: reduce if Tenuki O.K. }
+							ForEachChild (@JosekiTree^.tree, FindMove);
+							if FoundTenuki then
+								MoveValue := CONTINUE_OR_TENUKI
+							else
+								MoveValue := CONTINUE_NO_TENUKI;
+						end;
+					BelowCurr:{play in a Tenuki situation}
+						begin
+							ForEachChild (@JosekiTree^.tree, FindMove);
+							if FoundTenuki then
+								MoveValue := CONTINUE_OR_TENUKI
+							else
+								MoveValue := CONTINUE_NO_TENUKI;
+						end;
+					OffCurr: {opponent has played Tenuki, not in tree}
+						begin
+							ForEachChild (@prevJosekiTree^.tree, FindMove);
+							MoveValue := AFTER_NO_TENUKI;
+						end;
+				end; {case JosekiState}
+			if x <> 0 then
+				with gh^,DocumentInfo do
+					begin						
+						JosekiStrPt := @dBoard [x, y];
+											
+						{ xxx eliminate legality check? }
+						LegalMove := TryMakeMove (gH, atPt, false{later: don't Tell User}, 
+									JosekiStrPt, true{placePoint is known}, false {temporary});
+						if LegalMove = 0 then
+							begin
+								tempAnal := NewAnalysis (@gH^.PointGraph, JosekiMoveAnal, 
+											nil, nil, 
+											p2Node(JosekiStrPt), PointsGraphLevel);
+								{$IFC TraceMove}
+								if TraceMakeMoves then
+									begin
+										write ('    Joseki at ');
+										WritePoint (x, y);
+										writeln(' value: ', MoveValue:1);
+									end;
+								{$ENDC}
+								Push (@gH^.PointGraph, TheMoves [MoveValue], 
+											p2Node(tempAnal));
+								UnMakeMove(gH);
+							end;
+					end;
+		end; {FindJosekiMoves}
+	
+	var
+		bSizeThreshold: integer;
+		
+	procedure OccupyAnEdge (block1: p2Node);
+		var whichEdge: integer;
+			EdgeMovePt : p2GOPoint;
+		
+		procedure FindBestMem (ptOfStrOfBlk1: p2Node {p2GOPoint});
+			{ ptOfStrOfBlk1 is a candidate point for an Edge Move }
+			{ xxx for now take the first, improve later }
+			begin
+				if EdgeMovePt = nil then
+					EdgeMovePt := p2GOPoint (ptOfStrOfBlk1);
+			end; {FindBestMem}
+	
+		procedure FindBestPoint (strOfBlk1: p2Node);
+			begin
+				if whichEdge = 0 then
+				with p2GOPoint (strOfBlk1^.Child)^ do
+					begin
+						whichEdge := NearestSide;
+					end;
+				if p2GOPoint(strOfBlk1^.Child)^.Line > 2 then
+					EachElement (strOfBlk1, FindBestMem);
+			end; {FindBestPoint}
+			
+		var LowS: StringHighState; MoveValue: integer; 
+			tempAnal: p2Analysis;
+			
+		begin {OccupyAnEdge}
+			LowS.StrStateInt := block1^.LowState;
+			if (LowS.StrTyp = EdgeTerrStr) and 
+				(NumBlkPoints (block1) >= bSizeThreshold) then
+					begin 
+						NumEmptyEdge := NumEmptyEdge+1;
+						{Evaluate Edge Move}
+						EdgeMovePt := nil;
+						whichEdge := 0;
+						EachElement (block1, FindBestPoint);
+						
+						tempAnal := NewAnalysis (@gH^.PointGraph, JosekiMoveAnal, 
+									nil, nil, 
+									p2Node(EdgeMovePt), PointsGraphLevel);
+						MoveValue := OCCUPY_EMPTY_EDGE;
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							begin
+								writeln('Adding Edge move with value: ', MoveValue:1 );
+								write(' Move is ');
+								PrintPointItem (p2Node (EdgeMovePt) );
+								writeln;
+							end;
+						{$ENDC}
+						Push (@gH^.PointGraph, TheMoves [MoveValue], 
+									p2Node(tempAnal));
+					end;
+		end; {OccupyAnEdge}
+		
+	var machineBlockColor: TBlockType;
+
+	procedure MakeABase (group1: p2Node);
+		var StrOfGrp1: p2Node;
+		
+		procedure FindStone (BlkOfGrp1: p2Node);
+			var LowS: StringHighState; 
+			begin
+				LowS.StrStateInt := BlkOfGrp1^.LowState;
+				if (LowS.StrTyp = BlackStonesStr) or (LowS.StrTyp = WhiteStonesStr) then
+					StrOfGrp1 := BlkOfGrp1^.Child;
+			end; {FindStone}
+			
+		var LowS: BlockHighState; MoveValue: integer; 
+			tempAnal: p2Analysis;
+			
+		begin {MakeABase}
+			LowS.BlockStateInt := group1^.LowState;
+			if LowS.BlockTyp = machineBlockColor then
+				begin
+					if machineBlockColor = BlackGroup then
+						CountingStrColor := BlackStonesStr
+					else
+						CountingStrColor := WhiteStonesStr;
+					if NumGrpStones (group1) = 1 then
+						begin
+							StrOfGrp1 := nil;
+							EachElement (group1, FindStone);
+							tempAnal := p2GOPoint(StrOfGrp1^.Child)^.AnalysisResult;
+							if tempAnal <> nil then
+								if tempAnal^.result = Safe then
+									{ don't try to make a base from unsafe strings }
+									begin
+										tempAnal := ExtendOff (gH, group1, true);
+										if tempAnal = nil then
+											begin
+												{$IFC qDebug}
+												GOEngineError('ExtendOff refuses to do its job!', 0 , 0);
+												{$ENDC}
+											end
+										else
+											begin
+												MoveValue := tempAnal^.result;
+												if MoveValue < EXTEND_ONE_STONE then
+													MoveValue := EXTEND_ONE_STONE;
+												tempAnal^.result := ExtendMoveAnal;
+												{$IFC TraceMove}
+												if TraceMakeMoves then
+													begin
+														writeln('Adding Make Base move with value: ', MoveValue:1 );
+														PrintAnalPointItem (tempAnal);
+														writeln;
+													end;
+												{$ENDC}
+												Push (@gH^.PointGraph, TheMoves [MoveValue], 
+															p2Node(tempAnal));
+											end; {else }
+									end; {if tempAnal^.result = Safe}
+						end; {if NumGrpStones (group1) = 1}
+				end; {if LowS.BlockTyp = machineBlockColor }
+		end; {MakeABase}
+		
+	begin {JosekiMove}
+		NumEmptyEdge := 4; { if we don't count, assume they are empty }
+		NumActiveJoseki := 0;
+		{$IFC TraceJosekiMoves}
+		if TraceMakeMoves then
+			writeln('  Making Joseki Choices.');
+		{$ENDC}
+		NumAtBegin := 0;
+		with gh^, DocumentInfo do
+			begin
+				EachJosekiMgr (@DocumentInfo, FindJosekiMoves);
+				{$IFC TraceJosekiMoves}
+				if TraceMakeMoves then
+					writeln('    NumAtBegin: ', NumAtBegin:1);
+				{$ENDC}
+				if (NumAtBegin = 0) and DoDevelopment then
+					begin { Fuseki player, after corners occupied }
+						bSizeThreshold := DocumentInfo.dHoshiline;
+						bSizeThreshold := bSizeThreshold*3;
+						NumEmptyEdge := 0; { Joseki done, so now we count }
+						EachGOGraphNode (@BlockGraph, OccupyAnEdge);
+						{$IFC TraceJosekiMoves}
+						if TraceMakeMoves then
+							writeln('    NumEmptyEdge: ', NumEmptyEdge:1);
+						{$ENDC}
+						NumOneStoneGroups := 0;
+						if InOpeningStages then
+							begin { don't try to make a base in the end game }
+								if dBlackToPlay then
+									machineBlockColor := BlackGroup
+								else
+									machineBlockColor := WhiteGroup;
+								EachGOGraphNode (@GroupGraph, MakeABase);
+							end;
+						if (NumEmptyEdge = 0) and (NumOneStoneGroups = 0) then
+							begin { xxx make an Areas level development move }
+								{ xxx invade moyo's }
+							end;
+					end;
+			end;
+	end; {JosekiMove}
+
+function ContactPlay (gH :p2GOAbstHier; SPt : p2GOPoint; AttackString : boolean):p2GoPoint;
+	{Contact Move has license to do a little more searching.}
+	{AttackString == true if this is the opponent's string.}
+	{S is the String to be attacked or saved}
+	{xxx Should ContactPlay check to see if the play will be succesful?  Here it does not.}
+	{ Yes! it should.  Otherwise returns the wrong move! kjf }
+
+	var AS : p2Node;
+		AttackerMove : integer;
+		SuccessfulMove : p2GOPoint;
+	
+	    procedure FindLiberty(LibNode : P2Node);
+			var s: PointHighState;
+		    begin
+				s.PtStateInt := LibNode^.LowState;
+			    if s.PtOcc >= UnOcc then 
+					   AS := LibNode;
+			end; {FindLiberty}
+			
+	begin {ContactPlay}
+		{$IFC TraceMove}
+		if TraceMakeMoves then
+			begin
+				write('Entering ContactPlay on point ');
+				with SPt^ do
+					WritePoint (XCoord, YCoord);
+				writeln;
+			end;
+		{$ENDC}
+		SuccessfulMove := nil; { pass }
+		if SPt <> nil then
+			with SPt^ do 
+				if AttackString then
+					begin
+						if AnalysisResult <> nil then
+							with AnalysisResult^ do
+								if attackTree <> nil then
+									with attackTree^ do
+										begin
+											{$IFC TraceMove}
+											if TraceMakeMoves then
+												begin
+													write('Kill Point to Move is ');
+													WritePoint (TreeMoveX, TreeMoveY);
+													writeln;
+												end;
+											{$ENDC}
+											if TreeMoveX <> 0 then
+												SuccessfulMove :=  @gH^.DocumentInfo.dBoard[TreeMoveX, TreeMoveY];
+										end;
+					end
+				else   
+					if AnalysisResult <> nil then
+						with AnalysisResult^ do
+							if defendTree <> nil then
+								with defendTree^ do
+									begin
+										{$IFC TraceMove}
+										if TraceMakeMoves then
+											begin
+												write('Save Point to Move is ');
+												WritePoint (TreeMoveX, TreeMoveY);
+												writeln;
+											end;
+										{$ENDC}
+										if TreeMoveX <> 0 then
+											SuccessfulMove :=  @gH^.DocumentInfo.dBoard[TreeMoveX, TreeMoveY];
+										{ xxx need logic to evaluate and find better defense moves. }
+									end;
+									
+		ContactPlay := SuccessfulMove;
+		{$IFC TraceMove}
+		if TraceMakeMoves then
+			begin
+				write('Leaving ContactPlay: ');
+				PrintPointItem (p2Node(SuccessfulMove));
+				writeln;
+			end;
+		{$ENDC}
+	end; {ContactPlay}
+
+{$IFC TraceMove}
+const
+	debugCountGroup = true;
+{$ELSEC}
+const
+	debugCountGroup = false;
+{$ENDC}
+	
+type
+	GroupCountRec = 
+		record
+			GrpDame: integer;
+			grpColor: TStringType;
+			FriendStones, 
+			OppStones, 
+			OutSideLibs, 
+			InsideLibs,
+			PotTerr: integer;
+				{ from FindSafety }
+			HealthyEyes: p2ListItem;
+			UnHealthyEyes: p2ListItem;
+			UnVitalEyes: p2ListItem;
+			TrueEyes: p2ListItem;
+			Strings: p2ListItem;
+			SafeStrings: p2ListItem;
+				{ Safety Summary }
+			HasEyes: Boolean;
+		end;
+		
+		{ some group count recs used by Cut/Connect evaluators }
+const
+	MaxCountRecs = 10;
+type
+	CutConnectCountRecs = record
+		theGroups: array [1..MaxCountRecs] of GroupCountRec;
+		NumCountRecs: integer;
+	end;
+	
+procedure ReturnCutConnectLists (gH: p2GOAbstHier; var someRecs: CutConnectCountRecs);
+	var i: integer;
+	begin
+		with gH^, someRecs do
+			for i := 1 to NumCountRecs do
+				with theGroups[i] do
+					begin
+						ReturnToAvailList(@BlockGraph, HealthyEyes); 
+						ReturnToAvailList(@BlockGraph, UnHealthyEyes); 
+						ReturnToAvailList(@BlockGraph, UnVitalEyes); 
+						ReturnToAvailList(@BlockGraph, TrueEyes); 
+						ReturnToAvailList(@BlockGraph, SafeStrings); 
+						ReturnToAvailList(@BlockGraph, Strings); 
+					end;
+		someRecs.NumCountRecs := 0;
+	end; {ReturnCutConnectLists}
+
+procedure CountGroup (gH: p2GOAbstHier; gRep: p2GOPoint; var cntRec: GroupCountRec);
+	{ count the group represented by gRep. }
+	{ the group's color is grpColor. }
+	
+	var theGroup: p2Node; 
+			
+	procedure CountGroupStrings (p3: p2Node {a String});
+		var surrounded: Boolean;
+		
+		procedure ChkIfSurrounded (adjP: p2Node);
+			begin
+				if adjP^.Parent^.Parent <> theGroup then
+					surrounded := false;
+			end; {ChkIfSurrounded}
+			
+		var LowS: StringHighState; n: integer;
+		begin {CountGroupStrings}
+			LowS.StrStateInt := p3^.HighState; 
+			n := NumElements (p3);
+			with cntRec do
+				if LowS.StrTyp >= FirstTerrStringType then
+					PotTerr := PotTerr + n
+				else
+					case LowS.StrTyp of
+						BlackStonesStr, WhiteStonesStr:
+							if LowS.StrTyp = grpColor then
+								FriendStones := FriendStones + n
+							else
+								OppStones := OppStones + n;
+						BlkLibStr, JntLibStr, WhtLibStr:
+							begin
+								surrounded := true;
+								EachAdjNode (p3, ChkIfSurrounded);
+								if surrounded then
+									InsideLibs := InsideLibs + 1 {tricky Optimization! Libs are unique}
+								else
+									OutSideLibs := OutSideLibs + 1;
+							end;
+					end; {cases}
+		end; {CountGroupStrings}
+		
+	procedure CountGroupBlocks (p2: p2Node {a block});
+		begin
+			EachElement (p2, CountGroupStrings);
+		end; {CountGroupBlocks}
+		
+	var
+		lowS: BlockHighState;
+		
+	begin {CountGroup}
+		if debugCountGroup then
+			begin
+				write ('Count Group at ');
+				with gRep^ do
+					WritePoint (XCoord, YCoord);
+			end; 
+		with cntRec do
+			begin
+				FriendStones := 0;
+				OppStones := 0;
+				OutSideLibs := 0;
+				InsideLibs := 0;
+				PotTerr := 0;
+				theGroup := gRep^.PtNode^.Parent^.Parent;
+				
+				HealthyEyes := nil;
+				UnHealthyEyes := nil;
+				UnVitalEyes := nil;
+				TrueEyes := nil;
+				Strings := nil;
+				SafeStrings := nil;
+				
+				lowS.BlockStateInt := theGroup^.LowState;
+				if lowS.BlockTyp = BlackGroup then
+					grpColor := BlackStonesStr
+				else
+					grpColor := WhiteStonesStr;
+				if debugCountGroup then
+					begin
+						write ('Count Group at ');
+						with gRep^ do
+							WritePoint (XCoord, YCoord);
+						if grpColor = BlackStonesStr then writeln (' Black Stones ')
+						else writeln (' White Stones ')
+					end; 
+				GrpDame := GroupDame(theGroup);
+				HasEyes := false;
+				if GrpDame >= 3 then
+					begin
+						{$IFC TraceMove}
+						writeln (' Has Eyes.');
+						{$ENDC}
+						HasEyes := true; { can get them later!}
+					end
+				else
+					begin
+						{$IFC TraceMove}
+						writeln (' Not enough Eyes, calling FindSafety:.');
+						{$ENDC}
+						FindSafety(gH, theGroup, grpColor,
+								HealthyEyes, UnHealthyEyes, UnVitalEyes, TrueEyes, Strings, 
+								SafeStrings);
+						if StackSize (HealthyEyes) + StackSize (UnHealthyEyes) > 4 then
+							HasEyes := true
+						else if StackSize (HealthyEyes) + StackSize (UnHealthyEyes) > 7 then
+							HasEyes := true
+						else if StackSize (HealthyEyes) + StackSize (UnHealthyEyes) 
+										+ StackSize (UnVitalEyes) > 12 then
+							HasEyes := true
+					end;
+				EachElement (theGroup, CountGroupBlocks);
+				if debugCountGroup then
+					begin
+						writeln (' GrpDame: ', GrpDame:1,
+									', FriendStones: ', FriendStones:1,
+									', OppStones: ', OppStones:1,
+									', OutSideLibs: ', OutSideLibs:1,
+									', InsideLibs: ', InsideLibs:1,
+									', PotTerr: ', PotTerr:1);
+					end; 
+			end; {with cntRec}
+	end; {CountGroup}
+		
+(* *** counts the groups surrounding a point *** *)
+procedure CountCutConStrGroups (gH: p2GOAbstHier; aString { or aPoint!}: p2Node;
+		var CountRecs: CutConnectCountRecs;
+		DoPointLevel: Boolean
+			{ to distinguish each "adjPoint" from each "adjString" levels of counting }
+		{proceudure Visit (aGroup or aPoint);??} );
+	
+	var	{ temporary (group) node lists: }
+		blkGroups, whtGroups: p2ListItem;
+	
+	procedure CheckGroup (adjStr: p2Node);
+		var adjGrp: p2Node; lowS: BlockHighState;
+		begin
+			adjGrp := adjStr^.Parent^.Parent;
+			lowS.BlockStateInt := adjGrp^.LowState;
+			case lowS.BlockTyp of
+				BlackGroup:
+					if PushUnique (@gH^.PointGraph, blkGroups, adjGrp) then
+						with CountRecs do
+							if NumCountRecs < MaxCountRecs then
+								begin
+									NumCountRecs := NumCountRecs + 1;
+									CountGroup (gH, p2GOPoint(adjStr^.Child), theGroups [NumCountRecs]);
+								end;
+				WhiteGroup:
+					if PushUnique (@gH^.PointGraph, whtGroups, adjGrp) then
+						with CountRecs do
+							if NumCountRecs < MaxCountRecs then
+								begin
+									NumCountRecs := NumCountRecs + 1;
+									CountGroup (gH, p2GOPoint(adjStr^.Child), theGroups [NumCountRecs]);
+								end;
+			end; {cases}
+		end; {CheckGroup}
+		
+	procedure CallCheckGroup (pDoc: p2DocInfo; p2: p2GOPoint);
+		begin
+			CheckGroup (p2^.PtNode);
+		end; {CallCheckGroup}
+
+	begin {CountCutConStrGroups}
+		blkGroups := nil; whtGroups := nil;		
+		CountRecs.NumCountRecs := 0;
+		if DoPointLevel then
+			begin
+				CheckGroup (p2GOPoint(aString)^.PtNode); { include the point }
+				EachAdjPoint (@gH^.DocumentInfo, p2GOPoint(aString), CallCheckGroup);
+			end
+		else
+			begin
+				CheckGroup (aString); { include the string }
+				EachAdjNode (aString, CheckGroup);
+			end;
+		
+		(* ***
+			is further evaluation needed: ??
+			xxx should the groups be checked for dead/alive? (not currently recorded)
+			do we want to convert group pointers to representative points: ??
+		ListColor := BlackOcc;
+		PopEach (@gH^.PointGraph, BlkGroups, FurtherEvaluation);
+		ListColor := WhiteOcc;
+		PopEach (@gH^.PointGraph, WhtGroups, FurtherEvaluation);
+		*** *)
+		
+		{ these are lists of actual Group nodes, 
+			so can't hold across dynamic routines like StringStatus }
+		ReturnToAvailList (@gH^.PointGraph, blkGroups);
+		ReturnToAvailList (@gH^.PointGraph, whtGroups);
+
+	end; {CountCutConStrGroups}
+
+procedure GroupLifeMove (gH: p2GOAbstHier; var TheMoves: MoveScoreCard);
+
+	var {variables shared by GroupLifeMove and CheckForGroupLife }
+		ClassifyGroupList : p2ListItem;
+	
+	procedure CheckForGroupLife (QueryGroup : p2Node);
+		var
+			LowS : BlockHighState;
+	{Check if QueryGroup should be checked for Absolute Life / Death.}
+	{if it should, push a representative point onto ClassifyGroupList}
+		begin
+			LowS.BlockStateInt := QueryGroup^.LowState;
+			if (LowS.BlockTyp = BlackGroup) or (LowS.BlockTyp = WhiteGroup) then
+				begin
+					{ count, for use in cut/connect analysis later: }
+					if (LowS.BlockTyp = BlackGroup) = (ComputerColor = BlackOcc) then
+						FriendGroupCount := FriendGroupCount+1
+					else
+						OpponentGroupCount := OpponentGroupCount+1;
+						
+					if GroupDame(QueryGroup) = 0 then
+						Push (@gH^.GroupGraph, ClassifyGroupList, 
+							QueryGroup^.Child^.Child^.Child)
+					else
+						{$IFC TraceMakeLife}
+						if TraceMakeMoves then
+							begin
+								write ('CheckForGroupLife: at ');
+								with p2GoPoint(QueryGroup^.Child^.Child^.Child)^ do
+									WritePoint (XCoord, YCoord);
+								writeln (' was occupied, but Dame <> 0');
+							end;
+						{$ENDC}
+				end;
+		end; {CheckForGroupLife}
+	  
+	procedure ClassifyGroup (bG : p2Graph;  GroupRep : p2Node);
+	{GroupRep is a p2Node that points to a GoPoint that represents an
+	interesting group.}
+	var
+		nMove : p2GoPoint;
+		BlockSafe : boolean;
+		val: integer; tempAnal: p2Analysis; tempTree: p2TreeNode;
+		CGRec: GroupCountRec;
+	begin
+		{$IFC TraceMove}
+		if TraceMakeMoves then
+			begin
+				write ('ClassifyGroup is called on the group at ');
+				with p2GoPoint(GroupRep)^ do
+					WritePoint (XCoord, YCoord);
+				writeln;
+			end;
+		{$ENDC}
+		CreateLife1 (gH, p2GoPoint(GroupRep)^.PtNode^.Parent^.Parent, BlockSafe, nMove);
+		if (not BlockSafe) and (nMove <> nil) then
+			begin
+				{ xxx a dead white stone could end up being the rep for a black group }
+				{ xxx also liberties }
+				CountGroup (gH, p2GoPoint(GroupRep),CGRec); { xxx not nMove}
+				with CGRec do
+					begin
+						{xxxx}
+						val := (PotTerr + 2*FriendStones + OutsideLibs + InsideLibs) +
+							(PotTerr + 2*OppStones) -2;
+					end;
+				NewMoveTreeNode(@gH^.PointGraph, tempTree, nMove);
+				if p2GoPoint(GroupRep)^.OccStatus = ComputerColor then
+					tempAnal := NewAnalysis (@gH^.PointGraph, GroupSave, nil, tempTree, 
+							GroupRep, GroupsGraphLevel)
+				else
+					tempAnal := NewAnalysis (@gH^.PointGraph, GroupKill, tempTree, nil, 
+							GroupRep, GroupsGraphLevel);
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					begin
+						writeln('Adding GroupLife move with value: ', val:1 );
+					end;
+				{$ENDC}
+				if val > MaxMoveValues then
+					val := MaxMoveValues;
+				Push (@gH^.PointGraph, TheMoves[val], p2Node(tempAnal))
+			end;
+		{$IFC TraceMove}
+		if TraceMakeMoves then
+			begin
+				if nMove = nil then
+					writeln(' No move was found.')
+				else if BlockSafe then 
+					begin
+						write(' An Un Necessary move was found at ');
+						with nMove^ do
+							WritePoint (XCoord, YCoord);
+						writeln;
+					end
+				else
+					begin
+						write(' A Necessary move was found at ');
+						with nMove^ do
+							WritePoint (XCoord, YCoord);
+						writeln;
+					end
+			end;
+		{$ENDC}
+	end; {ClassifyGroup}
+		
+	begin {GroupLifeMove}
+		ClassifyGroupList := nil;
+		
+		with gh^,DocumentInfo do
+			begin
+				EachGOGraphNode (@GroupGraph, CheckForGroupLife);
+					
+				if ClassifyGroupList <> nil then
+					PopEach (@GroupGraph, ClassifyGroupList, ClassifyGroup);
+			end;
+		
+end; {GroupLifeMove}
+
+function EvaluateCut (gH: p2GOAbstHier; TargetStrColor: TOccStatus;
+											var InitRecs, CutRecs, ConnectRecs: CutConnectCountRecs): integer;
+	var
+		tempValue: integer;
+		nUnSafe: integer;
+		maxUnSafeSize, thisSize: integer;
+		nCutTarget, nCutCutter: integer;
+		nInitTarget, nInitCutter: integer;
+		nConnectTarget, nConnectCutter: integer;
+		i: integer;
+	begin
+		tempValue := 0;
+			{ Value of a cut/connect: }
+		{ count the unsafe groups after the cut }
+		nUnSafe := 0; maxUnSafeSize := 0;
+		nCutTarget := 0; nCutCutter := 0;
+		nInitTarget := 0; nInitCutter := 0;
+		nConnectTarget := 0; nConnectCutter := 0;
+		with CutRecs do
+			for i := 1 to NumCountRecs do
+				with theGroups[i] do
+					if (grpColor=BlackStonesStr) = (TargetStrColor=BlackOcc) then
+						begin
+							nCutTarget := nCutTarget+1;
+							if GrpDame <= 4 then
+								if not HasEyes then
+									begin
+										nUnSafe := nUnSafe + 1;
+										thisSize := FriendStones+OppStones+OutSideLibs+InsideLibs+PotTerr;
+										if thisSize > maxUnSafeSize then
+											maxUnSafeSize := thisSize;
+									end;
+						end
+					else
+						begin
+							nCutCutter := nCutCutter+1;
+						end;
+		{ if all groups are safe after cut/connect, then use the group Values: }
+		if nUnSafe = 0 then
+			begin
+				with InitRecs do
+					for i := 1 to NumCountRecs do
+						with theGroups[i] do
+							if (grpColor=BlackStonesStr) = (TargetStrColor=BlackOcc) then
+								begin
+									nInitTarget := nInitTarget+1;
+								end
+							else
+								begin
+									nInitCutter := nInitCutter+1;
+								end;
+				with ConnectRecs do
+					for i := 1 to NumCountRecs do
+						with theGroups[i] do
+							if (grpColor=BlackStonesStr) = (TargetStrColor=BlackOcc) then
+								begin
+									nConnectTarget := nConnectTarget+1;
+								end
+							else
+								begin
+									nConnectCutter := nConnectCutter+1;
+								end;
+				if ComputerColor = TargetStrColor then
+					begin { this is evaluating cut/connect of computer's groups }
+						{ Value of a Cut Defense move is due to FewerFriends }
+						if nConnectTarget < nInitTarget then
+							tempValue := tempValue + (nInitTarget-nConnectTarget)*FewerFriendsValue;
+						{ and preventing NewEnemy and NewFriends }
+						if nCutCutter > nInitCutter then
+							tempValue := tempValue + (nCutCutter-nInitCutter)*NewEnemyValue;
+						if nCutTarget > nInitTarget then
+							tempValue := tempValue + (nCutTarget-nInitTarget)*NewFriendValue;
+					end
+				else
+					begin{ this is evaluating cut/connect of opponent's groups }
+						{ Value of a Cut move is due to NewFriends, and NewEnemy  }
+						if nCutCutter > nInitCutter then
+							tempValue := tempValue + (nCutCutter-nInitCutter)*NewFriendValue;
+						if nCutTarget > nInitTarget then
+							tempValue := tempValue + (nCutTarget-nInitTarget)*NewEnemyValue;
+						{ and preventing FewerEnemies }
+						if nConnectTarget < nInitTarget then
+							tempValue := tempValue + (nInitTarget-nConnectTarget)*FewerEnemiesValue;
+					end;
+			end
+		else { value is the size of the largest unsafe group after cut. }
+			begin
+				tempValue := maxUnSafeSize;
+				{ xxx add the bonus/penalties as well? }
+			end;
+		{$IFC TraceMove}
+		writeln ('Evaluate Cut: nUnSafe = ', nUnSafe:1, ' maxUnSafeSize = ', maxUnSafeSize:1);
+		write('  FewerFriends: ', FewerFriendsValue:1, ' NewFriend: ', NewFriendValue:1);
+		writeln(' FewerEnemies: ', FewerEnemiesValue:1, ' NewEnemy: ', NewEnemyValue:1);
+		{$ENDC}
+		
+		ReturnCutConnectLists (gH, InitRecs);
+		ReturnCutConnectLists (gH, CutRecs);
+		ReturnCutConnectLists (gH, ConnectRecs);
+		
+		if tempValue < 0 then
+			tempValue := 0;
+		EvaluateCut := tempValue;
+	end; {EvaluateCut}
+
+procedure DoCutConnectPoints (gH: p2GOAbstHier; TargetStrColor: TOccStatus;
+				var CutConnectPoints: p2ListItem;
+				var TheMoves: MoveScoreCard);
+				
+
+	var
+			{ Move point and strings: }
+			{ xxx not likely that move involves more than two strings, but... }
+		MovePt, Str1Pt, Str2Pt: p2GOPoint; 
+		
+			{ initial status variables: }
+		
+			{ after cut status variables: }
+		
+			{ after connect status variables: }
+		
+		saveBlackToPlay: Boolean;
+		LegalMove: integer;
+		dummyPt: Point; { needed to call TryMakeMove, but not used }
+
+		candList: p2ListItem;
+		defendPt: p2GOPoint;
+		
+		MoveValue: integer;
+		
+		tempMoveTree, tempDefendTree: p2TreeNode;
+		movType: integer;
+		tempAnal: p2Analysis;
+		
+		InitRecs, CutRecs, ConnectRecs: CutConnectCountRecs;
+		
+	begin {DoCutConnectPoints}
+	
+		with gH^ do
+			begin
+				MovePt := p2GOPoint(Pop (@StringGraph, CutConnectPoints));
+				Str1Pt := p2GOPoint(Pop (@StringGraph, CutConnectPoints));
+				Str2Pt := p2GOPoint(Pop (@StringGraph, CutConnectPoints));
+			end;
+		
+		{ Count number of groups, number of Points in groups }
+		{$IFC TraceConnects}
+		write ('Cut/Connect Point? Move is ');
+		if TargetStrColor = WhiteOcc then write ('Black at ')
+		else write ('White at '); with MovePt^ do writePoint (XCoord, YCoord);
+		write (' String1: '); with Str1Pt^ do writePoint (XCoord, YCoord);
+		write (' String2: '); with Str2Pt^ do writePoint (XCoord, YCoord);
+		writeln;
+		write ('  Before Move: ');
+		{$ENDC}
+		
+		MoveValue := 0;
+		
+		CountCutConStrGroups (gH, p2Node(MovePt), InitRecs, true {, InitAnalysis??});
+				
+		with gH^, DocumentInfo do
+			begin
+			
+				{ save dBlackToPlay, and set for cut and connect moves. }
+				saveBlackToPlay := dBlackToPlay;
+
+					{ **** A. Test if can Cut **** }
+				
+				if TargetStrColor = BlackOcc then
+					dBlackToPlay := false { cut is of opposite color }
+				else
+					dBlackToPlay := true;
+					
+				LegalMove := TryMakeMove (gH, dummyPt,  false, MovePt, true,
+														false {temporary});
+				if LegalMove = 0 then { cut move is legal }
+					begin
+						{ Count number of groups, number of Points in groups }
+						{$IFC TraceMove}
+						write ('    After Cut: ');
+						{$ENDC}
+
+						CountCutConStrGroups (gH, p2Node(MovePt), 
+							CutRecs, true {, afterCutAnalysis??});
+							
+						UnMakeMove (gH);
+						
+							{ *** B. Test if can Connect or defend cut. *** }
+						{ Candidates: MovePt. xxx later: liberties of MovePt? }
+						{ Note: by pushing MovePt first, it will be considered last.
+							That is, this code would "prefer" to defend cuts by occupying 
+							adjacent liberties.  In general, this tends to make better 
+							"eye shape" but requires tactical analysis also.
+						xxx later: don't push it, but do a separate analysis, and find 
+						local information to make a more intelligent choice. }
+						candList := nil;
+						Push (@gH^.PointGraph, candList, p2Node(MovePt));
+						(* ***
+							xxx CAUTION: to enable this, would need to (recursively?) evaluate
+							Cut/Connect points, since Adj Liberty may not defend the cut.
+							See ':Problems:Vol. 1 30-25 kyu:Prob. 32' for an example.
+						EachAdjPoint (@gH^.PointGraph, MovePt, AddLibs);
+						*** *)
+						{ find a move that connects or defends the cut: }
+							defendPt := p2GOPoint (Pop (@gH^.PointGraph, candList));
+						if defendPt <> nil then { passes don't cut/connect much! }
+							begin
+								dBlackToPlay := not dBlackToPlay;
+								LegalMove := TryMakeMove (gH, dummyPt,  false, defendPt, true,
+											false {temporary});
+								if LegalMove = 0 then { connect or defend move is legal }
+									begin
+										{ Count number of groups, number of Points in groups }
+										{$IFC TraceMove}
+										write ('    After Defend: ');
+										{$ENDC}
+
+										CountCutConStrGroups (gH, p2Node(MovePt), 
+											ConnectRecs, true {, afterConnectAnalysis??});
+										
+										{ Note the status of Str1, Str2 after move (StringStatus) }
+										
+										{ evaluate move, as if both cut and defense work: }
+
+										(* *** evaluate as if safe, test later: *)
+
+										UnMakeMove (gH);
+										
+																						
+										MoveValue := EvaluateCut (gH, TargetStrColor,
+													InitRecs, CutRecs, ConnectRecs);
+													
+										if MoveValue > 0 then
+											begin
+												if MoveValue > MaxMoveValues then
+													MoveValue := MaxMoveValues;
+												NewMoveTreeNode(@gH^.PointGraph, tempMoveTree, MovePt);
+												NewMoveTreeNode(@gH^.PointGraph, tempDefendTree, DefendPt);
+												if TargetStrColor = ComputerColor then
+													begin
+														movType := DefendCutPointAnal;
+														{$IFC TraceConnects}
+														write ('  Adding Defend Cut Point ');
+																with MovePt^ do
+																	WritePoint (XCoord, YCoord);
+																writeln (' with value: ', 
+																MoveValue:1 );
+														{$ENDC}
+													end
+												else
+													begin
+														movType := MakeCutPointAnal;
+														{$IFC TraceMove}
+														if TraceMakeMoves then
+															begin
+																write ('  Adding Make Cut Point ');
+																with MovePt^ do
+																	WritePoint (XCoord, YCoord);
+																writeln (' with value: ', 
+																		MoveValue:1 );
+															end;
+														{$ENDC}
+													end;
+												if dNextMove >  8 {2*dBoardSize} then
+													begin
+														tempAnal := NewAnalysis (@gH^.PointGraph, movType, 
+																tempMoveTree, tempDefendTree, 
+																p2Node(Str1Pt), GroupsGraphLevel);
+														Push (@gH^.PointGraph, TheMoves[MoveValue], 
+																p2Node(tempAnal))
+													end
+												else
+													begin
+														{$IFC TraceConnects}
+															writeln ('  Discarding cut/connect point -- too early in game. ');
+														{$ENDC}
+													end;
+											end; {if MoveValue > 0}
+									end; {if LegalMove = 0 (legal defend move)}
+							end; {else}
+					end; {if LegalMove = 0 (legal cut move)}
+				{ restore dBlackToPlay. }
+				dBlackToPlay := saveBlackToPlay;
+			end; {with gH^, DocumentInfo}
+	end; {DoCutConnectPoints}
+			
+procedure DoCutConnectStrings (gH: p2GOAbstHier; TargetStrColor: TOccStatus;
+				var CutConnectStrings: p2ListItem;
+				var TheMoves: MoveScoreCard);
+						
+	var
+			candList: p2ListItem;
+
+	procedure AddCands (p2: p2Node{really a p2GOPoint});
+		begin
+			Push (@gH^.PointGraph, candList, p2);
+		end; {AddCands}
+	
+	var
+			{ Move point and strings: }
+			{ xxx not likely that move involves more than two groups, but... }
+		ConStrPt,	Grp1Pt, Grp2Pt: p2GOPoint; 
+		MovePt, BestMovePt: p2GOPoint; 
+		
+		InitRecs, CutRecs, ConnectRecs: CutConnectCountRecs;
+		
+		OnMove: Boolean; { if true, 
+													the Cut/Connect player is due to move, no extra pass
+											 if false,
+											 		this is a Cut/Connect "defend" evaluation,
+													extra "pass is needed to evaluate the Cut/Connect. }
+		LegalMove: integer;
+
+		dummyPt: Point; { needed to call TryMakeMove, but not used }
+		PassPt: p2GOPoint; { nil, var parameter for TryMakeMove}
+
+		done: Boolean;
+		defendPt: p2GOPoint;
+		
+		MoveValue, BestMoveValue: integer;
+		
+		tempMoveTree, tempDefendTree: p2TreeNode;
+		movType: integer;
+		tempAnal: p2Analysis;
+		
+		Hack: integer; { used in adjusting MoveValues. }
+		
+	begin {DoCutConnectStrings}
+
+		PassPt := nil;
+		
+		{ Step One: Get the problem to solve. }
+		with gH^,DocumentInfo do
+			begin
+				ConStrPt := p2GOPoint(Pop (@StringGraph, CutConnectStrings));
+				Grp1Pt := p2GOPoint(Pop (@StringGraph, CutConnectStrings));
+				Grp2Pt := p2GOPoint(Pop (@StringGraph, CutConnectStrings));
+				
+				OnMove := (dBlackToPlay = (TargetStrColor = WhiteOcc));
+						{ Black to play a cut with White target, or vice versa }
+			end;
+		
+		{$IFC TraceConnects}
+		write ('Cut/Connect String? Connections are ');
+		if TargetStrColor = WhiteOcc then 
+			write ('White in string ')
+		else 
+			write ('Black in string '); 
+		with ConStrPt^ do writePoint (XCoord, YCoord);
+		write (' Group1: '); with Grp1Pt^ do writePoint (XCoord, YCoord);
+		write (' Group2: '); with Grp2Pt^ do writePoint (XCoord, YCoord);
+		writeln;
+		{$ENDC}
+		
+
+		{ push the candidate moves onto list }
+		candList := nil;
+		EachElement (ConStrPt^.PtNode, AddCands);
+		
+		{ Step Two: evaluate the candidates. }
+		MovePt := p2GOPoint(Pop (@gH^.PointGraph, candList));
+		BestMovePt := nil;
+		BestMoveValue := 0;
+		
+		if not OnMove then { Pass }
+			LegalMove := TryMakeMove (gH, dummyPt, false, PassPt {pass}, true,
+												false {temporary});
+		
+		while MovePt <> nil do
+			with gH^, DocumentInfo do
+				begin
+					{ 1. evaluate one point of the string }
+					MoveValue := 0;
+					
+					{ 1A. do initial evaluation: }
+					
+					{$IFC TraceMove}
+					write ('  Before move: ');
+					{$ENDC}
+					
+					CountCutConStrGroups (gH, MovePt^.PtNode, InitRecs, false {, InitAnalysis??});
+
+					{ 1B. Test if can Cut }
+					LegalMove := TryMakeMove (gH, dummyPt,  false, MovePt, true, false {temporary});
+					if LegalMove = 0 then { cut move is legal }
+						begin
+							{ 1C. Evaluate the Cut }
+							
+							{$IFC TraceMove}
+							write ('  After cut: ');
+							{$ENDC}
+							
+							CountCutConStrGroups (gH, MovePt^.PtNode, 
+								CutRecs, false {, afterCutAnalysis??});
+															
+							UnMakeMove (gH);
+							{ 1D. Test if can Connect }
+							LegalMove := TryMakeMove (gH, dummyPt, false, PassPt {pass}, true,
+																false {temporary});
+
+							LegalMove := TryMakeMove (gH, dummyPt,  false, MovePt, true, 
+									false {temporary});
+							if LegalMove = 0 then { connect move is legal }
+								begin
+									CountCutConStrGroups (gH, MovePt^.PtNode, 
+										ConnectRecs, false {, afterConnectAnalysis??});
+										
+									UnMakeMove (gH); { undo the connect move }
+									
+									{ 1E. Evaluate the Connect }
+																		
+										MoveValue := EvaluateCut (gH, TargetStrColor,
+													InitRecs, CutRecs, ConnectRecs);
+																					
+								end; {if LegalMove = 0 (connect)}
+							
+							UnMakeMove (gH); { undo the pass }
+							
+						end; { if LegalMove = 0 (cut)}
+						
+					{ 2. see if this is the first or best point }
+					if MoveValue > 0 then
+						if (BestMovePt = nil) or (MoveValue > BestMoveValue) then
+							begin
+								BestMovePt := MovePt;
+								BestMoveValue := MoveValue;
+							end;
+							
+					{ 3. get the next point of the string }
+					MovePt := p2GOPoint(Pop (@gH^.PointGraph, candList));
+
+				end; {while MovePt <> nil do with gH^, DocumentInfo}
+		
+		if not OnMove then { undo Pass }
+			UnMakeMove (gH);
+			
+		{ Step Three: enter the best move on the ScoreBoard. }
+		if BestMovePt <> nil then
+			begin
+				if BestMoveValue > MaxMoveValues then
+					BestMoveValue := MaxMoveValues;
+				NewMoveTreeNode(@gH^.PointGraph, tempMoveTree, BestMovePt);
+				if TargetStrColor = ComputerColor then
+					begin
+						movType := MakeConnectStringAnal;
+						tempDefendTree := nil;
+						(* *** try it without suppression:
+						with gh^.DocumentInfo do
+							if dNextMove < 8 {2*dBoardSize} then 
+								{ early opening: first 9 moves 9x9, 19 .. }
+								if BestMoveValue >= 8 then { value of Joseki, etc. }
+									begin
+										BestMoveValue := BestMoveValue div 2;
+									end;
+								*** *)
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							write('  Adding Make Connect String move: ');
+						{$ENDC}
+					end
+				else
+					begin
+						movType := DefendConnectStringAnal;
+						tempDefendTree := tempMoveTree;
+						tempMoveTree := nil;
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							write('  Adding Defend Connect String move: ');
+						{$ENDC}
+					end;
+					
+				{ done with evaluation, is it the first, or the best?? }
+				
+				with gh^.DocumentInfo do
+					if dNextMove >  8 {2*dBoardSize} then 
+						begin
+							{$IFC TraceMove}
+							if TraceMakeMoves then
+								begin
+									with BestMovePt^ do WritePoint (XCoord, YCoord);
+									writeln(' with value: ', BestMoveValue:1 );
+								end;
+							{$ENDC}
+							tempAnal := NewAnalysis (@gH^.PointGraph, movType, 
+									tempMoveTree, tempDefendTree, 
+									p2Node(Grp1Pt), GroupsGraphLevel);
+							Push (@gH^.PointGraph, TheMoves[BestMoveValue], 
+									p2Node(tempAnal))
+						end
+					else
+						begin
+							{$IFC TraceMove}
+							with BestMovePt^ do WritePoint (XCoord, YCoord);
+							writeln(' *** Not making move, too early.');
+							{$ENDC}
+						end;
+			end; {if BestMovePt}
+		
+	end; {DoCutConnectStrings}
+			
+var
+			{ variables shared by AnalyzeStrings, TacticalMove and CutConnect routines }
+		{ "CutConnect" strings are adjacent to strings in different groups. }
+	BlkCutWhtConnectStrings,							{ Possible: Black can cut, White can connect }
+	WhtCutBlkConnectStrings: p2ListItem;	{ Possible: White can cut, Black can connect }
+	
+		{ "CutConnect" points (liberties) are adjacent to strings in one group, }
+		{ for which there are no alternate connections. }
+	BlkCutWhtConnectPoints,							{ Possible: Black can cut, White can connect. }
+	WhtCutBlkConnectPoints: p2ListItem;	{ Possible: White can cut, Black can connect. }
+		
+var
+	OpponentDeadList: p2ListItem;
+		  
+procedure AnalyzeStrings (gH: p2GOAbstHier;
+						var OpponentKillList, FriendSaveList, BlackHaneList, WhiteHaneList, UnPressingMove,
+						OpponentAtariPtList: p2ListItem);
+
+	function AltConnect (FirstLib: p2GOPoint; S1, S2: p2Node): Boolean;
+		{ Returns true if there is an "alternate" connection between S1 and S2, }
+		{ i.e. another liberty, or "unsafe" friendly stone }
+		{ besides FirstLib which is adjacent to both S1 and S2 }
+		var
+			AltConnectPts: p2ListItem;
+			
+		procedure FindAltConnectPts (AdjToS1: p2Node);
+			var QueryPt: p2GOPoint;
+			begin
+				QueryPt := p2GOPoint(AdjToS1^.Child);
+				with QueryPt^ do
+					case PtStrType.PtOcc of
+						LibertyOcc:
+							if QueryPt <> FirstLib then
+								Push (@gH^.StringGraph, AltConnectPts, p2Node(QueryPt));
+						otherwise
+							with QueryPt^ do
+								if AnalysisResult <> nil then
+									if AnalysisResult^.Result <> Safe then
+										Push (@gH^.StringGraph, AltConnectPts, p2Node(QueryPt));
+					end; {cases}
+			end; {FindAltConnectPts}
+	
+		var AltLib: p2GOPoint;
+		
+		procedure FindAltPoint (StrGraph: p2Graph; p: p2Node);
+			var PossAltLib: p2GOPoint;
+			
+			procedure CheckIfAltConnect (p2: p2Node);
+				begin
+					if p2GOPoint(p2^.Child) = PossAltLib then
+						AltLib := PossAltLib;
+				end; {CheckIfAltConnect}
+				
+			begin {FindAltPoint}
+				PossAltLib := p2GOPoint(p);
+				EachAdjNode (S2, CheckIfAltConnect);
+			end; {FindAltPoint}
+		
+		begin {AltConnect}
+			AltConnect := false;
+			AltConnectPts := nil;
+			AltLib := nil;
+			EachAdjNode (S1, FindAltConnectPts);
+			{$IFC TraceMove}
+			if TraceCutConnect then
+				begin
+					write ('AltConnect, from: ');
+					with p2GOPoint(S1^.Child)^ do
+						writePoint (XCoord, YCoord);
+					write (' to: ');
+					with p2GOPoint(S2^.Child)^ do
+						writePoint (XCoord, YCoord);
+					write(' AltConnectPts list: ');
+					PrintList (AltConnectPts);
+					writeln;
+				end;
+			{$ENDC}
+			if AltConnectPts <> nil then
+				begin
+					PopEach (@gH^.StringGraph, AltConnectPts, FindAltPoint);
+					AltConnect :=  AltLib <> nil;
+				end;
+			if TraceCutConnect then
+				if AltLib <> nil then
+					begin
+						write ('  Found AltConnect: ');
+						with AltLib^ do
+							WritePoint (XCoord, YCoord);
+						writeln;
+					end; 
+		end; {AltConnect}
+		
+	var	{ variables shared by AnalyzeStrings and CheckForClassify1 }
+		FriendPressedStones: p2ListItem;
+		WhiteSoleLiberty : p2ListItem;
+		
+
+	procedure CheckForClassify1 (QueryStr: p2Node);
+		{ Check if QueryStr is one of the strings to classify for kill/save analysis. }
+		{ If it is, push a representative GOPoint on a classify list stack. }
+				
+		var HighS: StringHighState; QueryPt: p2GOPoint; 
+			nPoints, nLibs: integer; endangered: Boolean;
+			QPtHighS : PointHighState;
+			nl: integer;
+		begin {CheckForClassify1}
+			QueryPt := p2GOPoint(QueryStr^.Child);
+			with QueryPt^ do
+				if OccStatus = UnOcc then
+					begin
+						if PtStrType.PtOcc = LibertyOcc then
+							begin
+								case PtStrType.BlAdjWhAdj of
+									B0W1, B0W2, B0W3, B0W4:
+										Push (@gH^.StringGraph, WhiteSoleLiberty, p2Node(QueryPt));
+								end; {case}
+							end;
+					end
+				else
+					begin
+						case QueryPt^.AnalysisResult^.result of
+							Dead:
+								if ( ComputerColor <> QueryPt^.OccStatus ) then
+									Push (@gH^.StringGraph, OpponentDeadList, p2Node(QueryPt));
+							CanKillCanLive, Ko: 
+								{This is a string to consider killing/saving.}
+								{ xxx What does adding "Ko" here do? -Ans -- Always fills Ko's.}
+								if ( ComputerColor <> QueryPt^.OccStatus ) then
+									Push (@gH^.StringGraph, OpponentKillList, p2Node(QueryPt))
+								else
+									Push (@gH^.StringGraph, FriendSaveList,  p2Node(QueryPt));
+							UnknownCanLive:
+								if  ComputerColor = QueryPt^.OccStatus then
+									Push (@gH^.StringGraph, FriendSaveList,  p2Node(QueryPt));
+							CanKillUnknown:
+								if  ComputerColor <> QueryPt^.OccStatus then
+									Push (@gH^.StringGraph, OpponentKillList,  p2Node(QueryPt));
+							Safe:
+								begin
+									QueryStr := QueryPt^.PtNode;
+									nl := NumLiberties (QueryStr);
+									if ComputerColor = QueryPt^.OccStatus then
+										begin
+											if nl <= 5 then
+												begin
+													nPoints := NumElements (QueryStr);
+													endangered := true;
+													case nPoints of
+														1: 	if nl = 4 then 
+																	{ single points, Line 2 and above are not endangered }
+																	endangered := false;
+														2:	if nl = 5 then  
+																	{ two points: 
+																		Line 2 and above, w/one opponent contact or
+																		one Line 1 contact are not endangered }
+																	endangered := false;
+													end; {cases}
+													if endangered then
+														Push (@gH^.StringGraph, FriendPressedStones, p2Node(QueryPt));
+												end;
+										end
+									else
+										begin
+											if nl = 2 then
+												Push (@gH^.StringGraph, OpponentAtariPtList, p2Node(QueryPt));
+												{ xxx should this be <= or = 2? }
+												{ if < 2 (i.e. 1) then is Ko or SnapBack to not be CanKillCanLive? }
+												{ for now, only do "simple" or "pure" double ataris }
+												{ reconsider after examples of failure occur }
+										end;
+								end;							
+						end; { case }
+					end;
+		end; {CheckForClassify1}
+		
+	procedure CheckForClassify2 (QueryStr: p2Node);
+		{ Check if QueryStr is one of the strings to classify for cut/connect. }
+		{ If it is, push a representative GOPoint on a classify list stack. }
+		
+		var { Black and White Groups and Strings for identifying Cut/Connect Candidates }
+			BlkGroup1, BlkGroup2, WhtGroup1, WhtGroup2 : p2Node; 
+			BlkString1, BlkString2, WhtString1, WhtString2: p2Node;
+			SeenUnSafe: Boolean;
+			
+		procedure ChkUnsafe (Str3: p2Node);
+			var
+				highS: StringHighState;	{ high state of string }
+			begin
+				highS.StrStateInt := Str3^.HighState;
+				if (highS.StrTyp = WhiteStonesStr) or (highS.StrTyp = BlackStonesStr) then
+					begin
+						with p2GOPoint(Str3^.Child)^ do
+							if AnalysisResult <> nil then
+								if AnalysisResult^.Result <> Safe then 
+									{ xxx should this be CanKillCanLive? }
+									SeenUnSafe := true;
+					end;
+			end; {ChkUnsafe}
+			
+		procedure FindBlkWht (Str2: p2Node);
+			{ 	Sets Blk and Wht Group and String indicators
+				so as to identify potential Cut/Connect Strings and Points }
+			var grpOfStr2: p2Node; 
+				highS: StringHighState;	{ high state of string }
+				lowS: BlockHighState; 	{ low state of group }
+			begin
+				grpOfStr2 := Str2^.Parent^.Parent;
+				lowS.BlockStateInt := grpOfStr2^.lowState;
+				highS.StrStateInt := Str2^.HighState;
+				if (highS.StrTyp = WhiteStonesStr) or (highS.StrTyp = BlackStonesStr) then
+					begin
+						with p2GOPoint(Str2^.Child)^ do
+							if AnalysisResult <> nil then
+								if AnalysisResult^.Result <> Safe then 
+									{ xxx should this be CanKillCanLive? }
+									SeenUnSafe := true;
+					end;
+				if not SeenUnSafe then
+					begin
+						ChkUnsafe (Str2);
+						EachAdjNode (Str2, ChkUnsafe);
+					end;
+				case lowS.BlockTyp of
+					BlackGroup:
+						if not SeenUnSafe then
+							begin
+								{ check for Cut/Connect Strings }
+								if BlkGroup1 = nil then { this is the first }
+									BlkGroup1 := grpOfStr2
+								else if BlkGroup2 = nil then { haven't found two yet }
+									begin
+										if grpOfStr2 <> BlkGroup1 then
+											BlkGroup2 := grpOfStr2; { second group }
+									end;
+								{ check for Cut/Connect Points }
+								if highS.StrTyp = BlackStonesStr then
+									if BlkString1 = nil then
+										BlkString1 := Str2
+									else
+										begin
+											if Str2 <> BlkString1 then
+												BlkString2 := Str2; { second string }
+										end;
+							end;
+					WhiteGroup:
+						if not SeenUnSafe then
+							begin
+								{ check for Cut/Connect Strings }
+								if WhtGroup1 = nil then { this is the first }
+									WhtGroup1 := grpOfStr2
+								else if WhtGroup2 = nil then { haven't found two yet }
+									begin
+										if grpOfStr2 <> WhtGroup1 then
+											WhtGroup2 := grpOfStr2; { second group }
+									end;
+								{ check for Cut/Connect Points }
+								if highS.StrTyp = WhiteStonesStr then
+									if WhtString1 = nil then
+										WhtString1 := Str2
+									else
+										begin
+											if Str2 <> WhtString1 then
+												WhtString2 := Str2; { second string }
+										end;
+							end; {if not SeenUnSafe}
+					{ xxx DisputedGroup: ??? Both Black and White? }
+				end; {cases}
+			end; {FindBlkWht}
+		
+		var HighS: StringHighState; QueryPt: p2GOPoint; 
+		begin {CheckForClassify2}
+			QueryPt := p2GOPoint(QueryStr^.Child);
+			with QueryPt^ do
+				if OccStatus = UnOcc then
+					begin
+						BlkGroup1 	:= nil; BlkGroup2 	:= nil;
+						WhtGroup1 	:= nil; WhtGroup2 	:= nil;
+						BlkString1	:= nil; BlkString2	:= nil; 
+						WhtString1	:= nil; WhtString2	:= nil; 
+						SeenUnSafe := false;
+						
+						EachAdjNode (QueryStr, FindBlkWht);
+						
+						if BlkGroup2 <> nil then { Candidate CutConnect String }
+							begin
+								(* 
+								EachElement (BlkGroup1, ChkBlkSafety);
+								EachElement (BlkGroup2, ChkBlkSafety);
+								*)
+								if not SeenUnSafe then
+									begin
+										Push (@gH^.StringGraph, WhtCutBlkConnectStrings, 
+												BlkGroup1^.Child^.Child^.Child);
+										Push (@gH^.StringGraph, WhtCutBlkConnectStrings, 
+												BlkGroup2^.Child^.Child^.Child);
+										Push (@gH^.StringGraph, WhtCutBlkConnectStrings, 
+												p2Node(QueryPt));
+									end;
+							end;
+							
+						if BlkString2 <> nil then { Candidate CutConnect Point }
+							if not AltConnect (QueryPt, BlkString1, BlkString2) then
+								begin
+								if not SeenUnSafe then
+									begin
+										Push (@gH^.StringGraph, WhtCutBlkConnectPoints, 
+												BlkString1^.Child);
+										Push (@gH^.StringGraph, WhtCutBlkConnectPoints, 
+												BlkString2^.Child);
+										Push (@gH^.StringGraph, WhtCutBlkConnectPoints, 
+												p2Node(QueryPt));
+									end;
+								end;
+						if WhtGroup2 <> nil then { Candidate CutConnect String }
+							begin
+								if not SeenUnSafe then
+									begin
+										Push (@gH^.StringGraph, BlkCutWhtConnectStrings, 
+												WhtGroup1^.Child^.Child^.Child);
+										Push (@gH^.StringGraph, BlkCutWhtConnectStrings, 
+												WhtGroup2^.Child^.Child^.Child);
+										Push (@gH^.StringGraph, BlkCutWhtConnectStrings, 
+												p2Node(QueryPt));
+									end;
+							end;
+						if WhtString2 <> nil then { Candidate CutConnect Point }
+							if not AltConnect (QueryPt, WhtString1, WhtString2) then
+								begin
+									if not SeenUnSafe then
+										begin
+											Push (@gH^.StringGraph, BlkCutWhtConnectPoints, 
+													WhtString1^.Child);
+											Push (@gH^.StringGraph, BlkCutWhtConnectPoints, 
+													WhtString2^.Child);
+											Push (@gH^.StringGraph, BlkCutWhtConnectPoints, 
+													p2Node(QueryPt));
+										end;
+								end;
+					end;
+		end; {CheckForClassify2}
+
+	procedure CheckForHane (StrGraph: p2Graph; WhiteSole: p2Node);
+		{ Dynamic analysis is allowed. }
+		{ Suggest hane points, on two lists. }
+		{ WhiteSole is a p2Node GOPoint. }
+		{ NOTE : CheckForHane must be called AFTER the Analysis values are on the board. }
+		var
+			QueryStr : p2Node;
+				{ Used by AdjToTacticalMoves }
+			TacticalSituation : boolean;
+			
+		procedure AdjToTacticalMoves (AdjToHanePoint : p2Node);
+			var
+				AdjLowS : PointHighState;
+			begin
+				AdjLowS.PtStateInt := AdjToHanePoint^.LowState;
+				if (AdjLowS.PtOcc = BlackOcc) or (AdjLowS.PtOcc = WhiteOcc) then
+					begin
+						with p2GOPoint (AdjToHanePoint^.Child)^ do
+							begin
+								if AnalysisResult <> nil then
+									if AnalysisResult^.result <> Safe then
+										TacticalSituation := true;
+							end;  {with ...}
+					end;  {if Stones string.}
+			end; {AdjToTacticalMoves}
+			
+			
+		procedure AdjSoleBlack (AdjToSoleWhite : p2Node);
+			{ AdjToSoleWhite is a string which is adjacent to a Sole White Liberty. }
+			var
+				AdjHighS : StringHighState;
+			begin
+				AdjHighS.StrStateInt := AdjToSoleWhite^.HighState;
+				if AdjHighS.StrTyp = BlkLibStr then
+					{ AdjToSoleWhite is a SoleBlackLib adjacent to a SoleWhiteLib }
+					begin
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							begin
+								write('in AdjSoleBlack, found Hane points at  ');
+								PrintPointItem(WhiteSole);
+								write(' and ');
+								PrintPointItem(AdjToSoleWhite^.Child);
+								writeln;
+							end;
+						{$ENDC}
+						{ White Point is not adjacent to a situation.  Is Black? }
+						TacticalSituation := false;
+						EachAdjNode ( AdjToSoleWhite, AdjToTacticalMoves);
+						if not TacticalSituation then
+							begin
+								Push (StrGraph, BlackHaneList, WhiteSole);
+								Push (StrGraph, WhiteHaneList, AdjToSoleWhite^.Child);
+							end;
+					end;
+			end; {AdjSoleBlack}
+			
+		begin {CheckForHane}
+			QueryStr := p2GOPoint (WhiteSole)^.PtNode;
+			TacticalSituation := false;
+			EachAdjNode (QueryStr, AdjToTacticalMoves);
+			if not TacticalSituation then
+				EachAdjNode (QueryStr, AdjSoleBlack)
+		 	else
+				begin
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							begin
+								PrintPointItem (WhiteSole);
+								writeln (' is adjacent to tactical situation. ');
+								{ xxx Make sure NEITHER hane point is adjacent to tactical situation. }
+								{ Do tactical check one deeper--is point adjacent to a string adjacent to
+									a string in a tactical situation? }
+							end;
+						{$ENDC}
+				end;
+		end; {CheckForHane}
+		
+	const
+		EXTEND_ONE = 8;
+		GOOD_EXTEND = 9;
+		EXTEND_STR = 7;
+		
+	procedure CheckForFriendPressed (StrGraph: p2Graph; p: p2Node);
+		{ p is a Pressed Friendly stone. }
+	var 
+		QueryPoint: p2GOPoint;
+		QueryStr: p2Node;
+		StartCount: integer; { count of analysis node }
+		GroupColor : TBlockType;
+		BlockState : BlockHighState;
+		RunningMove : p2Analysis; 
+
+
+	procedure AddFriendUnpressing (g : p2Graph; p : p2Node);
+		begin
+			{$IFC TraceMove}
+			if TraceMakeMoves then
+				begin
+					write ('Entering AddFriendUnPressing on move at ');
+					PrintPointItem (p);
+					writeln;
+				end;
+			{$ENDC}		
+
+			RunningMove := NewAnalysis (g, EXTEND_ONE {Estimated Value of Move}, nil, nil, p, StringsGraphLevel);
+			Push (g, UnPressingMove, p2Node (RunningMove) );
+		end;
+		
+	var
+		Move, BetterMove : p2GoPoint;
+			
+	procedure FindLongerStep (OffPntStr : p2Node);
+		{ Find a longish step off of OffPnt, a point of QueryStr. }
+		{ Note : this is allowed to do lookahead.  Don't trust OffStr, though. }
+		{ Static function.  Find a point that is adjacent to a sole liberty of OffStr. }
+		{ Failing that, find a point that is adjacent to a joint liberty of OffStr. }
+		{ Knight's moves : find a point that is adjacent to a terr point that is adjacent to
+			a sole liberty of the string. }
+		var
+			OffPnt : p2GOPoint;
+			pDoc: p2DocInfo;
+			
+		procedure EvaluateKnght (pDoc: p2DocInfo; TestPoint : p2GOPoint);
+			var Pnt1, Pnt2 : p2GOPoint;
+					PntX, PntY : integer; 
+					HighS : PointHighState;
+			{ Pnt1 is adjacent to TestPoint, the Knight's move. }
+			{ Pnt2 is adjacent to OffPnt, the stone we are extending from. }
+			{ Pnt1 and Pnt2 are adjacent. }
+			{ Pnt 1 and Pnt2 are the WAIST of the Knight's Move. }
+			{ This is a BetterMove iff :
+				Pnt1 is territory.
+				Pnt2 is SoleLiberty. }
+			begin
+			{$IFC TraceMove}
+			if TraceMakeMoves then
+				begin
+					write ('Entering EvaluateKnght on move at ');
+					PrintPointItem (p2Node(TestPoint));
+				end;
+			{$ENDC}
+				if TestPoint^.PtStrType.PtOcc = UnOcc then
+					{ This is a territory point.  Won't bump into friend or enemy. }
+						begin
+							if abs (TestPoint^.XCoord - OffPnt^.XCoord) = 2 then
+								begin
+									PntY := TestPoint^.YCoord;
+									PntX := TestPoint^.XCoord - (TestPoint^.XCoord - OffPnt^.XCoord) div 2;
+									Pnt1 := @pDoc^.dBoard[PntX, PntY];
+									PntY := OffPnt^.YCoord;
+									PntX := OffPnt^.XCoord - (TestPoint^.XCoord - OffPnt^.XCoord) div 2;
+									Pnt2 := @pDoc^.dBoard[PntX, PntY];
+								end
+							else
+								begin
+									PntX := TestPoint^.XCoord;
+									PntY := TestPoint^.YCoord - (TestPoint^.YCoord - OffPnt^.YCoord) div 2;
+									Pnt1 := @pDoc^.dBoard[PntX, PntY];
+									PntX := OffPnt^.XCoord;
+									PntY := OffPnt^.YCoord - (TestPoint^.YCoord - OffPnt^.YCoord) div 2;
+									Pnt2 := @pDoc^.dBoard[PntX, PntY];
+								end;
+							if Pnt1^.PtStrType.PtOcc = UnOcc then
+								case Pnt2^.PtStrType.BlAdjWhAdj of
+										B0W1, B1W0,B0W2,B2W0,B3W0,B0W3,B4W0,B0W4 : BetterMove := TestPoint;
+								end
+							else 
+								case Pnt2^.PtStrType.BlAdjWhAdj of
+										B0W1, B1W0,B0W2,B2W0,B3W0,B0W3,B4W0,B0W4 : Move := TestPoint;
+								end;
+						end;
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					begin
+						PrintPointItem (p2Node(Pnt1));
+						PrintPointItem (p2Node(Pnt2));
+						if BetterMove = TestPoint then writeln (' That was a BetterMove.')
+						else if Move = TestPoint then writeln (' That was a Move ')
+						else writeln (' REJECTED. ');
+					end;
+				{$ENDC}
+			end;
+
+		{ Variables used by CountLibs and its Callers, EachDiag and Each Skip. }
+		var
+			SoleLibs, JointLibs : integer;
+			
+		procedure CountLibs (pDoc: p2DocInfo; AdjToTestPoint : p2GOPoint);
+			begin
+				case AdjToTestPoint^.PtStrType.BlAdjWhAdj of
+					B0W0 : ;  { Not a liberty. }
+					B0W1, B1W0,B0W2,B2W0,B3W0,B0W3,B4W0,B0W4 : SoleLibs := SoleLibs + 1;
+					B1W1, B2W1, B1W2, B3W1, B2W2, B1W3 : JointLibs := JointLibs + 1;
+				end; {case}
+			end;
+			
+		procedure EvaluateDiag (pDoc: p2DocInfo; TestPoint : p2GOPoint);
+			{ This is a Move if TestPoint is a territory point adjacent to 2 liberty }
+			{ points of OffPnt. }
+			{ It is a BetterMove if it is adjacent to 2 sole liberties of OffPnt. }
+			begin
+			{$IFC TraceMove}
+			if TraceMakeMoves then
+				begin
+					write ('Entering EvaluateDiag on move at ');
+					PrintPointItem (p2Node(TestPoint));
+					writeln;
+				end;
+			{$ENDC}
+				if TestPoint^.PtStrType.PtOcc = UnOcc then
+					{ This is a territory point.  Won't bump into friend or enemy. }
+						begin
+							SoleLibs := 0;
+							JointLibs := 0;
+							EachAdjPoint (pDoc, TestPoint, CountLibs);
+							if (SoleLibs = 2) and (JointLibs = 0) then
+								BetterMove := TestPoint
+							else if SoleLibs + JointLibs = 2 then
+								Move := TestPoint;
+						end;
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					begin
+						if BetterMove = TestPoint then writeln (' That was a BetterMove.')
+						else if Move = TestPoint then writeln (' That was a Move ')
+						else writeln (' REJECTED. ');
+					end;
+				{$ENDC}
+			end;
+			
+		procedure EvaluateSkip (pDoc: p2DocInfo; TestPoint : p2GOPoint);
+			{ This is a BetterMove if it is adjacent to a Sole Liberty of our String. }
+			begin
+			{$IFC TraceMove}
+			if TraceMakeMoves then
+				begin
+					write ('Entering EvaluateSkip on move at ');
+					PrintPointItem (p2Node(TestPoint));
+					writeln;
+				end;
+			{$ENDC}
+				if TestPoint^.PtStrType.PtOcc = UnOcc then
+					{ This is a territory point.  Won't bump into friend or enemy. }
+						begin
+							SoleLibs := 0;
+							JointLibs := 0;
+							EachAdjPoint (pDoc, TestPoint, CountLibs);
+							if (SoleLibs = 1) and (JointLibs = 0) then
+								BetterMove := TestPoint;
+						end;
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					begin
+						if BetterMove = TestPoint then writeln (' That was a BetterMove.')
+						else if Move = TestPoint then writeln (' That was a Move ')
+						else writeln (' REJECTED. ');
+					end;
+				{$ENDC}
+			end;
+			
+		begin {Find Longer STep }
+			{$IFC TraceMove}
+			if TraceMakeMoves then
+				begin
+					write ('Entering Find Longer STep on move at ');
+					PrintPointItem (OffPntStr);
+					writeln;
+				end;
+			{$ENDC}
+			OffPnt := p2GOPoint (OffPntStr);
+			pDoc := @gH^.DocumentInfo;
+			if BetterMove = nil then 
+				{ No great move found yet. }
+				begin
+					EachKnghtPoint (pDoc, OffPnt, EvaluateKnght);
+					if BetterMove <> nil then
+						EachDiagPoint (pDoc, OffPnt, EvaluateDiag);
+					if BetterMove <> nil then
+						EachSkipOnePoint (pDoc, OffPnt, EvaluateSkip);
+				end;
+		end;
+		
+	procedure RunTowardsTerr ( AdjGroup : p2Node );
+		var LowS : BlockHighState;
+			GoodTerr : boolean;
+			
+		procedure AdjToTerr ( AdjGroup2 : p2Node );
+			var	LowS2 : BlockHighState;
+			begin {AdjToTerr}
+				LowS2.BlockStateInt := AdjGroup2^.LowState;
+				if LowS2.BlockTyp >= FirstTerrBlock then
+					GoodTerr := true  {Territory leads to more territory.}
+				else if (LowS2.BlockTyp = GroupColor) and (AdjGroup2 <> p) then
+					{ Can connect to another group }
+					{ xxx Make sure that that group is not dead! }
+					GoodTerr := true;
+			end; {AdjToTerr}
+		
+		var
+			ContactPoints, LibsToTake : p2ListItem;
+			
+		begin {RunTowardsTerr}
+			{$IFC TraceMove}
+			if TraceMakeMoves then
+				begin
+					write ('Entering RunTowardsTerr on group at ');
+					PrintGroupItem (AdjGroup);
+					writeln;
+				end;
+			{$ENDC}
+			LowS.BlockStateInt := AdjGroup^.LowState;
+			if LowS.BlockTyp >= FirstTerrBlock then
+				{Is AdjGroup big enough to bother running towards?}
+				begin
+					GoodTerr := false;
+					EachAdjNode ( AdjGroup, AdjToTerr );
+					if GoodTerr then
+						begin
+							{$IFC TraceMove}
+							if TraceMakeMoves then
+								begin
+									writeln ('Running Towards this territory.');
+								end;
+							{$ENDC}
+							{ Run towards this territory. }
+							ContactPoints := nil; LibsToTake := nil;
+							ContactPoints := FindGroupContactPoints ( gH, QueryStr^.Parent^.Parent, AdjGroup);
+							AddEveryOtherPoint (@gH^.PointGraph, ContactPoints, LibsToTake);
+							{ Contact Points is empty.  LibsToTake has p2Node GoPoints }
+							{ of liberty points of QueryString. }
+							{ Add them all to the board. Low Priority (2?) }
+							PopEach ( @gH^.PointGraph, LibsToTake, AddFriendUnpressing );
+						end;
+				end
+		end; {RunTowardsTerr}
+		
+		
+		
+	begin {CheckForFriendPressed}
+		{$IFC TraceMove}
+		if TraceMakeMoves then
+			begin
+				write ('Possible Friend Pressed stone: ');
+				with p2GOPoint(p)^ do
+					WritePoint (XCoord, YCoord);
+				writeln;
+			end;
+		{$ENDC}
+		
+		QueryStr := p2GOPoint (p)^.PtNode;
+		Move := nil;
+		BetterMove := nil;
+		
+		{$IFC TraceMove}
+		if TraceMakeMoves then
+			begin
+				write ('Possible Friend Pressed move: Group at ');
+				PrintGroupItem (QueryStr^.Parent^.Parent);
+				writeln;
+			end;
+		{$ENDC}
+		
+		BlockState.BlockStateInt := QueryStr^.Parent^.Parent^.LowState;
+		GroupColor := BlockState.BlockTyp;
+		
+		{ Is there much hope for it?  What Direction should it run? }
+		{ If it is completely surrounded by Enemy Groups, abandon it. }
+		{ If it is adjacent to a safe, non-pressed string, connect it. }
+		{ If it is a single stone, take one step. }
+		{ If it is 2 + stones, take a larger step. }
+		{ If it is adjacent to large territory, Walk into territory. }
+			{ 1 Is it part of a larger group? }
+			if NumGrpStoneStr (QueryStr^.Parent^.Parent) > 3 then
+				{ String is part of a larger group. }
+				begin
+					{ Find a LibertyPoint towards a safe string.  Take it.  Not a big move. }
+				end
+			else
+				{ String is not part of a larger group }
+				begin
+					if GroupDame (QueryStr^.Parent^.Parent) = 0 then
+						{ String is surrounded.  Abandon it. }
+						begin
+						end
+					else
+						{ Run towards the open territory. }
+						begin
+							if NumElements (QueryStr) = 1 then
+								EachAdjNode ( QueryStr^.Parent^.Parent, RunTowardsTerr )
+							else 
+								begin
+									EachElement (QueryStr, FindLongerStep);
+									if BetterMove <> nil then
+										begin
+											RunningMove := NewAnalysis (@gH^.PointGraph, GOOD_EXTEND {Estimated Value of Move}, 
+												nil, nil, p2Node (BetterMove), StringsGraphLevel);
+											Push (@gH^.PointGraph, UnPressingMove, p2Node (RunningMove) );
+										end
+									else if Move <> nil then
+										begin
+											RunningMove := NewAnalysis (@gH^.PointGraph, EXTEND_STR {Estimated Value of Move}, nil, nil, 
+												p2Node (Move), StringsGraphLevel);
+											Push (@gH^.PointGraph, UnPressingMove, p2Node (RunningMove) );
+										end;
+								end;
+						end;
+				end;
+	end; {CheckForFriendPressed}
+	  	  
+	begin 	{AnalyzeStrings}
+			{ First level of classification }
+		FriendPressedStones := nil;
+		WhiteSoleLiberty := nil;
+		OpponentKillList := nil;
+		OpponentDeadList := nil;
+		FriendSaveList := nil;
+		BlackHaneList := nil;
+		WhiteHaneList := nil;
+		UnPressingMove := nil;
+			{ Cut/Connect Lists }
+		BlkCutWhtConnectStrings := nil;
+		WhtCutBlkConnectStrings := nil;
+		BlkCutWhtConnectPoints := nil;
+		WhtCutBlkConnectPoints := nil;
+				
+			{ Auxillary, temporary list }
+		OpponentAtariPtList := nil;
+		with gh^,DocumentInfo do
+			begin
+				EachGOGraphNode (@StringGraph, CheckForClassify1);
+				
+				{$IFC DoTimers}
+				EndOfPhase (Class1Phase);
+				{$ENDC}
+		
+				if FriendPressedStones <> nil then
+					PopEach (@StringGraph, FriendPressedStones, CheckForFriendPressed);
+
+				if WhiteSoleLiberty <> nil then
+					PopEach (@StringGraph, WhiteSoleLiberty, CheckForHane);
+
+				{$IFC DoTimers}
+				EndOfPhase (KillSavPhase);
+				{$ENDC}
+		
+				EachGOGraphNode (@StringGraph, CheckForClassify2);
+				
+				{$IFC DoTimers}
+				EndOfPhase (Class2Phase);
+				{$ENDC}
+		
+			end;
+	end; 	{AnalyzeStrings}
+
+procedure TacticalMove (gH: p2GOAbstHier;
+			OpponentKillList, FriendSaveList, BlackHaneList, WhiteHaneList, UnPressingMove,
+			OpponentAtariPtList : p2ListItem;
+			var TheMoves: MoveScoreCard);
+
+	procedure SuggestOpponentAtari (g: p2Graph; LibStr : p2Node);
+		{ LibStr is a Liberty node.  Add it to TheMoves as a low-value }
+		{ forcing move. }
+		var
+			LowS : PointHighState;
+			tempAnal : p2Analysis;
+			MoveValue : integer;
+			tempTree: p2TreeNode;
+		begin {SuggestOpponentAtari}
+			LowS.PtStateInt := LibStr^.LowState;
+			NewMoveTreeNode(@gH^.PointGraph, tempTree, p2GOPoint (LibStr^.Child) );
+			tempAnal := NewAnalysis (@gH^.PointGraph, SingleAtariAnal, 
+						tempTree, nil, LibStr^.Child, StringsGraphLevel);
+			if LowS.Lin1 = 1 then
+				{First Line push -- good atari! }
+				MoveValue := 3
+			else
+				MoveValue := 1;
+			{$IFC TraceMove}
+			if TraceMakeMoves then
+				begin
+					write('Adding Single Atari ');
+					PrintPointItem (LibStr^.Child);
+					writeln( ' with value: ',MoveValue:1 );
+				end;
+			{$ENDC}
+			if MoveValue >= MaxMoveValues then
+				Push (@gH^.PointGraph, TheMoves [MaxMoveValues], 
+					p2Node(tempAnal))
+			else
+				Push (@gH^.PointGraph, TheMoves [MoveValue], 
+					p2Node(tempAnal));
+		end; {SuggestOpponentAtari}
+		
+	var	{ variables shared by FindCommonLiberty, FindAllLiberty and TacticalMove }
+		CommonLibertyPt : p2GOPoint;
+		LibertyStrList : p2ListItem;
+		TargetOfDoubleAtari: p2GOPoint; { smallest of strings put in double atari }
+
+	procedure FindAllLiberty  (g: p2Graph; OppStrPt: p2Node);
+		{ Each opponent's string has two liberties.  Push them onto LibertyStrList}
+
+		procedure PushLibs (PossibleLibStr : p2Node);
+			var
+				LowS : PointHighState;
+			begin
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					begin
+						write('Entering PushLibs on the point ');
+						PrintPointItem (p2Node (PossibleLibStr^.Child) );
+						writeln;
+					end;
+				{$ENDC}
+				LowS.PtStateInt := PossibleLibStr^.LowState;
+				if LowS.PtOcc = LibertyOcc then
+					begin
+						Push (g, LibertyStrList, PossibleLibStr);
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							begin
+								write('Adding the Liberty Point ');
+								PrintPointItem (PossibleLibStr^.Child);
+								writeln;
+							end;
+						{$ENDC}
+					end;
+			end;
+		begin
+			{$IFC TraceMove}
+			if TraceMakeMoves then
+				begin
+					write('Entering FindAllLiberties on the point ');
+					PrintPointItem (p2Node (OppStrPt) );
+					writeln;
+				end;
+			{$ENDC}
+			EachAdjNode ( p2GOPoint(OppStrPt)^.PtNode, PushLibs);
+		end;
+
+	procedure FindCommonLiberty (g: p2Graph; OppStrPt: p2Node);
+		var Found: Boolean;
+	
+		procedure CheckLiberty (aPosLibStr: p2Node);
+			var
+				LibPt : p2GOPoint;
+				L : p2ListItem;
+			begin
+				LibPt := p2GOPoint (aPosLibStr^.Child);
+				if LibPt^.OccStatus = UnOcc then
+					begin
+						L := LibertyStrList;
+						while L <> nil do
+							begin
+								if L^.ListItem = aPosLibStr then
+									begin
+										CommonLibertyPt := LibPt;
+										Found := true;
+										exit (CheckLiberty);
+									end
+								else
+									L := L^.NextListItem;
+							end;
+						{ not found, add it to the list }
+						Push (g, LibertyStrList, aPosLibStr);
+					end;
+			end; {CheckLiberty}
+			
+		begin
+			Found := false;
+			EachAdjNode (OppStrPt^.Parent, CheckLiberty);
+			if Found then
+				if TargetOfDoubleAtari = nil then
+					TargetOfDoubleAtari := p2GOPoint(OppStrPt)
+				else
+					if NumElements (OppStrPt^.Parent) 
+						< NumElements (TargetOfDoubleAtari^.PtNode) then
+						TargetOfDoubleAtari := p2GOPoint(OppStrPt);
+		end; {FindCommonLiberty}
+
+	var	
+		TargetStrPt, MoveStrPt, DefendStrPt, AttackStrPt: p2GOPoint;
+		StatusMove: p2Analysis;
+		tempAnal: p2Analysis; 
+		tempTree: p2TreeNode;
+		MoveValue: integer;
+
+	{$IFC DebugGroupLists}
+	procedure WriteGroupPt (bG : p2Graph;  GroupRep : p2Node);
+		begin
+			PrintPointItem (GroupRep^.Child^.Child^.Child);
+		end; {WriteGroupPt}
+	{$ENDC}
+	var
+		AdjToCanKillCanSave: Boolean; FriendSaveOcc: TOccStatus;
+		
+	procedure ChkCanKillCanSave (n2: p2Node);
+		var adjPt: p2GOPoint; pAnal: p2Analysis; 
+		begin
+			adjPt := p2GOPoint(n2^.Child);
+			if adjPt^.OccStatus <> UnOcc then
+				if adjPt^.OccStatus <> FriendSaveOcc then
+					begin
+						pAnal := adjPt^.AnalysisResult;
+						if pAnal <> nil then
+							if pAnal^.result = CanKillCanLive then
+								AdjToCanKillCanSave := true;
+					end;
+		end; {ChkCanKillCanSave}
+	
+	var
+		TargetStrColor: TOccStatus;
+		tempList: p2ListItem;
+		
+	begin {TacticalMove}
+	
+		NumActiveJoseki := 0;
+		
+		with gh^,DocumentInfo do
+			begin
+				
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					begin
+						writeln ('In TacticalMove:');
+						if OpponentDeadList <> nil then begin
+							write ('  Opponent Dead List is: ');
+							PrintList (OpponentDeadList); writeln;
+						end;
+						if OpponentKillList <> nil then begin
+							write ('  Opponent Kill List is: ');
+							PrintList (OpponentKillList); writeln;
+						end;
+						if OpponentAtariPtList <> nil then begin
+							write ('  Opponent Atari List is: ');
+							PrintList (OpponentAtariPtList); writeln;
+						end;
+						if WhtCutBlkConnectStrings <> nil then begin
+							write ('  White Cut/Black Connect Strings are: ');
+							PrintList (WhtCutBlkConnectStrings); writeln;
+						end;
+						if BlkCutWhtConnectStrings <> nil then begin
+							write ('  Black Cut/White Connect Strings are: ');
+							PrintList (BlkCutWhtConnectStrings); writeln;
+						end;
+						if WhtCutBlkConnectPoints <> nil then begin
+							write ('  White Cut/Black Connect Points are: ');
+							PrintList (WhtCutBlkConnectPoints); writeln;
+						end;
+						if BlkCutWhtConnectPoints <> nil then begin
+							write ('  Black Cut/White Connect Points are: ');
+							PrintList (BlkCutWhtConnectPoints); writeln;
+						end;
+					end;
+				{$ENDC}
+				
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					if OpponentKillList <> nil then
+						begin
+							writeln('Looking for moves on Opponent Kill List.');
+						end;
+				{$ENDC}
+				
+				MaxKillSaveMove := 0;
+				while OpponentKillList <> nil do
+					begin
+						{Stones on stack are the strings to be attacked.}
+						TargetStrPt := p2GOPoint (Pop (@StringGraph, OpponentKillList));
+						if TargetStrPt <> nil then
+							begin
+								MoveStrPt := ContactPlay (gH, TargetStrPt, KillStrategy);
+								DefendStrPt := ContactPlay (gH, TargetStrPt, not(KillStrategy));
+								{ xxx Uses the one stored on board? }
+								{ needs to have target info added??? }
+								NewMoveTreeNode(@gH^.PointGraph, tempTree, MoveStrPt);
+								tempAnal := NewAnalysis (@gH^.PointGraph, OpponentKillAnal, 
+											tempTree, nil, p2Node(TargetStrPt), 
+											StringsGraphLevel);
+								MoveValue := EvaluateCapture (gH, TargetStrPt, MoveStrPt, DefendStrPt);
+								{$IFC TraceMove}
+								if TraceMakeMoves then
+									begin
+										write('Adding Opponent Kill move ');
+										PrintPointItem (p2Node(MoveStrPt));
+										writeln(' with value: ', 
+											MoveValue:1);
+									end;
+								{$ENDC}
+								if MoveValue > MaxMoveValues then
+									MoveValue := MaxMoveValues;
+								Push (@gH^.PointGraph, TheMoves[MoveValue], 
+									p2Node(tempAnal));
+								if MoveValue > MaxKillSaveMove then
+									MaxKillSaveMove := MoveValue;
+							end;
+					end;
+
+				while (OpponentDeadList <> nil) {xxx and PlayingChinese Rules} do
+					begin
+						{Stones on stack are the strings to be attacked.}
+						TargetStrPt := p2GOPoint (Pop (@StringGraph, OpponentDeadList));
+						if TargetStrPt <> nil then
+							begin
+								MoveStrPt := ContactPlay (gH, TargetStrPt, KillStrategy);
+								NewMoveTreeNode(@gH^.PointGraph, tempTree, MoveStrPt);
+								tempAnal := NewAnalysis (@gH^.PointGraph, OpponentKillAnal, 
+											tempTree, nil, p2Node(TargetStrPt), 
+											StringsGraphLevel);
+								MoveValue := 0;
+								{$IFC TraceMove}
+								if TraceMakeMoves then
+									begin
+										write('Adding take Opponent Dead Stones move ');
+										PrintPointItem (p2Node(MoveStrPt));
+										writeln(' with value: ', 
+											MoveValue:1);
+									end;
+								{$ENDC}
+								Push (@gH^.PointGraph, TheMoves[MoveValue], 
+									p2Node(tempAnal));
+							end;
+					end;
+					
+				{$IFC TraceMove}
+				if TraceMakeMoves then
+					if FriendSaveList <> nil then
+						begin
+							write ('  Friend Save List is: ');
+							PrintList (FriendSaveList); writeln;
+						end;
+				{$ENDC}
+				
+				while FriendSaveList <> nil do
+					begin
+						{Stones on stack are the strings to be saved.}
+						TargetStrPt := p2GOPoint (Pop (@StringGraph, FriendSaveList));
+						if TargetStrPt <> nil then
+							begin
+								MoveStrPt := ContactPlay (gH, TargetStrPt, not(KillStrategy));
+								AttackStrPt := ContactPlay (gH, TargetStrPt, KillStrategy);
+								{ Uses the one stored on board? }
+								{ needs to have target info added??? }
+								AdjToCanKillCanSave := false;
+								FriendSaveOcc := TargetStrPt^.OccStatus;
+								if MoveStrPt = nil then
+									begin
+												{$IFC TraceMove}
+												if TraceMakeMoves then
+													begin
+														write('***Not making Friend Save move: ');
+														writeln (' Pass Move.');
+													end;
+												{$ENDC}
+									end
+								else
+									begin
+										EachAdjNode (MoveStrPt^.PtNode, ChkCanKillCanSave);
+										if AdjToCanKillCanSave then
+											begin
+												{$IFC TraceMove}
+												if TraceMakeMoves then
+													begin
+														write('***Not making Friend Save move: ');
+														PrintPointItem (p2Node(MoveStrPt) );
+														writeln (' Adj to CanKillCanSave');
+													end;
+												{$ENDC}
+											end
+										else
+											begin
+												NewMoveTreeNode(@gH^.PointGraph, tempTree, MoveStrPt);
+												tempAnal := NewAnalysis (@gH^.PointGraph, FriendSaveAnal, 
+															nil, tempTree, p2Node(TargetStrPt), 
+															StringsGraphLevel);
+												MoveValue := EvaluateCapture (gH, TargetStrPt, AttackStrPt, MoveStrPt);
+												{$IFC TraceMove}
+												if TraceMakeMoves then
+													begin
+														write('Adding Friend Save move with value: ', MoveValue:1 , ' : ');
+														PrintAnalPointItem (tempAnal );
+														writeln;
+													end;
+												{$ENDC}
+												if MoveValue >= MaxMoveValues then
+													Push (@gH^.PointGraph, TheMoves [MaxMoveValues], 
+														p2Node(tempAnal))
+												else
+													Push (@gH^.PointGraph, TheMoves [MoveValue], 
+														p2Node(tempAnal));
+												if MoveValue > MaxKillSaveMove then
+													MaxKillSaveMove := MoveValue;
+											end; {else ... not AdjToCanKillCanSave  }
+									end; { else ... MovePt <> nil }
+							end; {if TargetStrPt <> nil}
+					end; {while FriendSaveList <> nil}
+					
+			if MaxKillSaveMove < CRITICAL_KILL_SAVE then
+				while BlackHaneList <> nil do
+					begin
+						TargetStrPt := p2GOPoint (Pop (@StringGraph, BlackHaneList));
+						tempAnal := NewAnalysis (@gH^.PointGraph, HaneAnal, 
+									nil, nil, p2Node(TargetStrPt), 
+									StringsGraphLevel);
+						MoveValue := EvaluateHane (TargetStrPt^.PtNode, (ComputerColor = BlackOcc) );
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							begin
+								write('Adding Hane move from BlackHaneList with value: ', MoveValue:1 , ' : ');
+								PrintAnalPointItem (tempAnal );
+								writeln;
+							end;
+						{$ENDC}
+						if MoveValue >= MaxMoveValues then
+							Push (@gH^.PointGraph, TheMoves [MaxMoveValues], 
+								p2Node(tempAnal))
+						else
+							Push (@gH^.PointGraph, TheMoves [MoveValue], 
+								p2Node(tempAnal));
+					end
+				else
+					ReturnToAvailList (@StringGraph, BlackHaneList);
+					
+			if MaxKillSaveMove < CRITICAL_KILL_SAVE then
+				while WhiteHaneList <> nil do 
+					begin
+						TargetStrPt := p2GOPoint (Pop (@StringGraph, WhiteHaneList));
+						tempAnal := NewAnalysis (@gH^.PointGraph, HaneAnal, 
+									nil, nil, p2Node(TargetStrPt), 
+									StringsGraphLevel);
+						MoveValue := EvaluateHane (TargetStrPt^.PtNode, (ComputerColor = WhiteOcc) );
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							begin
+								write('Adding Hane move from WhiteHaneList with value: ', MoveValue:1 , ' : ');
+								PrintAnalPointItem (tempAnal );
+								writeln;
+							end;
+						{$ENDC}
+						if MoveValue >= MaxMoveValues then
+							Push (@gH^.PointGraph, TheMoves [MaxMoveValues], 
+								p2Node(tempAnal))
+						else
+							Push (@gH^.PointGraph, TheMoves [MoveValue], 
+								p2Node(tempAnal));
+					end
+				else
+					ReturnToAvailList (@StringGraph, WhiteHaneList);
+					
+					
+			if MaxKillSaveMove < CRITICAL_KILL_SAVE then
+				while UnPressingMove <> nil do
+					begin
+						tempAnal := p2Analysis (Pop (@PointGraph, UnPressingMove) );
+						MoveValue := tempAnal^.result;
+						tempAnal^.result := PressMove;
+						{$IFC TraceMove}
+						if TraceMakeMoves then
+							begin
+								write('Adding a Pressing Move at');
+								PrintPointItem (tempAnal^.target);
+								writeln ('with value ',MoveValue:1);
+							end;
+						{$ENDC}
+						Push (@gH^.PointGraph, TheMoves [MoveValue], 
+							p2Node(tempAnal))
+					end;
+					
+
+					
+			LibertyStrList := nil;
+				{ Initialize LibertyStrList.  It is used for either double or single ataris. }
+						
+							
+			if MaxKillSaveMove < CRITICAL_KILL_SAVE then
+				begin
+						
+					if ( OpponentAtariPtList  <> nil ) then
+						{ Did not enter double atari logic.  Now build the LibertyStrList }
+							begin
+								tempList := OpponentAtariPtList;
+								while tempList <> nil do
+									begin
+										FindAllLiberty (@StringGraph, tempList^.ListItem);
+										tempList := tempList^.NextListItem;
+									end;
+							end;
+							
+					if (LibertyStrList <> nil) then
+						{ We have forcing atari moves to propose. }
+							PopEach (@StringGraph, LibertyStrList, SuggestOpponentAtari);
+					
+					if StackSize (OpponentAtariPtList) >= 2 then
+					{ look for common liberty }
+						begin
+							{$IFC TraceMove}
+							if TraceMakeMoves then
+								begin
+									writeln('Looking for moves on the Double Atari List.');
+								end;
+							{$ENDC}
+							{ for now, take first Double Atari }
+							{ xxx later, allow a list, or take most valuable? }
+							CommonLibertyPt := nil;
+							TargetOfDoubleAtari := nil;
+							PopEach (@StringGraph, OpponentAtariPtList, FindCommonLiberty);
+							if CommonLibertyPt <> nil then
+								begin
+									NewMoveTreeNode(@gH^.PointGraph, tempTree, CommonLibertyPt);
+									tempAnal := NewAnalysis (@gH^.PointGraph, DoubleAtariAnal, 
+												tempTree, nil, p2Node(TargetOfDoubleAtari), 
+												StringsGraphLevel);
+									MoveValue := 2 * NumElements (TargetOfDoubleAtari^.PtNode);
+									{$IFC TraceMove}
+									if TraceMakeMoves then
+										begin
+											writeln('Adding Double Atari with value: ',MoveValue:1 );
+										end;
+									{$ENDC}
+									if MoveValue >= MaxMoveValues then
+										Push (@gH^.PointGraph, TheMoves [MaxMoveValues], 
+											p2Node(tempAnal))
+									else
+										Push (@gH^.PointGraph, TheMoves [MoveValue], 
+											p2Node(tempAnal));
+								end; {if CommonLibertyPt <> nil}
+								
+						end; {if StackSize (OpponentAtariPtList) ... }
+
+					while BlkCutWhtConnectPoints <> nil do
+							DoCutConnectPoints (gH, WhiteOcc {TargetStrColor}, 
+									BlkCutWhtConnectPoints, TheMoves);
+								
+					while WhtCutBlkConnectPoints <> nil do
+							DoCutConnectPoints (gH, BlackOcc {TargetStrColor}, 
+									WhtCutBlkConnectPoints, TheMoves);
+									
+				end {MaxKillSaveMove < CRITICAL_KILL_SAVE}
+			else
+				begin
+					ReturnToAvailList (@gH^.StringGraph, LibertyStrList);
+					ReturnToAvailList (@gH^.StringGraph, BlkCutWhtConnectPoints);
+					ReturnToAvailList (@gH^.StringGraph, WhtCutBlkConnectPoints);
+				end;
+			
+			ReturnToAvailList (@gH^.StringGraph, OpponentAtariPtList);
+						
+
+			end; {with gh^}
+
+	end; {TacticalMove}
+
+const
+	AVGNEEDED = 10;
+	{ Minimum live groups have 2 eyes (liberties) and
+		6 points for corner,
+		8 points for edge,
+	 11 points for center. }
+   
+function ComputeMove (gH: p2GOAbstHier; DoDevelopment: Boolean): p2GOPoint;
+
+	var 
+		OpponentKillList, FriendSaveList, BlackHaneList, 
+				WhiteHaneList, UnPressingMove, OpponentAtariPtList : p2ListItem;
+		
+		RecommendedMoves: MoveScoreCard;
+		moveValue: integer;
+			
+		tempAnal: p2Analysis;
+		tempMove: p2GOPoint;
+		
+begin {ComputeMove}
+
+	{$IFC DoTimers}
+	EndOfPhase (UserPhase);
+	{$ENDC}
+	
+	{$IFC TraceAnalysisResults}
+	writeln ('Calling EndInvalidate from ComputeMove, points left: ');
+	with gh^.DocumentInfo do
+				PrintPointList (dAnalysisPoints);
+	writeln;
+	{$ENDC}
+	EndInvalidate (gH);
+	
+	{$IFC TraceMove}
+	writeln ('Calling SetGOAbstHierLevel to GroupsGraphLevel.');
+	{$ENDC}
+	
+	SetGOAbstHierLevel (gH, GroupsGraphLevel);
+	
+	{$IFC TraceMove}
+	writeln ('Back from SetGOAbstHierLevel.');
+	{$ENDC}
+	
+	SpinCursor (+32);
+	
+	for moveValue := 0 to MaxMoveValues do
+		RecommendedMoves [moveValue] := nil;
+
+	with gh^,DocumentInfo do
+		begin
+			if TraceMakeMoves then
+				begin
+					writeln;
+					write('Entering Compute Move, # ', dNextStone:1);
+					if dNextStone > 1 then
+						begin
+							write (' after ');
+							with dGameRecord [dNextMove -1] do
+								if MovePoint = nil then
+									write ('pass')
+								else with MovePoint^ do
+									WritePoint (XCoord, YCoord);
+						end; 
+					writeln;
+				end;
+			{ There has got to be a better way to find out which side the
+				computer is playing!}
+			if dBlackToPlay then
+				ComputerColor := BlackOcc
+			else
+				ComputerColor := WhiteOcc;
+				
+			case dBoardSize of 
+				9:
+					begin
+						TargetGroupMin := 1;
+						TargetGroupMax := 2;
+						FIRST_PLAY_IN_CORNER := 10;
+						CONTINUE_NO_TENUKI := 9;
+						EXTEND_ONE_STONE := 8;
+							OCCUPY_EMPTY_EDGE := 8;
+						AFTER_NO_TENUKI := 7;
+						CONTINUE_OR_TENUKI := 6;
+					end;
+				11:
+					begin
+						TargetGroupMin := 2;
+						TargetGroupMax := 3;
+						FIRST_PLAY_IN_CORNER := 10;
+						CONTINUE_NO_TENUKI := 9;
+						EXTEND_ONE_STONE := 8;
+							OCCUPY_EMPTY_EDGE := 8;
+						AFTER_NO_TENUKI := 7;
+						CONTINUE_OR_TENUKI := 6;
+					end;
+				13:
+					begin
+						TargetGroupMin := 3;
+						TargetGroupMax := 4;
+						FIRST_PLAY_IN_CORNER := 11;
+						CONTINUE_NO_TENUKI := 10;
+						EXTEND_ONE_STONE := 8;
+							OCCUPY_EMPTY_EDGE := 9;
+						AFTER_NO_TENUKI := 7;
+						CONTINUE_OR_TENUKI := 6;
+					end;
+				19:
+					begin
+						TargetGroupMin := 4;
+						TargetGroupMax := 5;
+						FIRST_PLAY_IN_CORNER := 12;
+						CONTINUE_NO_TENUKI := 11;
+						EXTEND_ONE_STONE := 9;
+							OCCUPY_EMPTY_EDGE := 10;
+						AFTER_NO_TENUKI := 8;
+						CONTINUE_OR_TENUKI := 7;
+					end;
+			end;
+				
+			InOpeningStages := dNextMove <= 
+					((dBoardSize*dBoardSize*2 div 3) { assume moves cover 2/3 of the board }
+						div 2);												{ and "OpeningStages" is 1/2 of that }
+				
+			AnalyzeStrings(gH, OpponentKillList, FriendSaveList, 
+						BlackHaneList, WhiteHaneList, UnPressingMove, OpponentAtariPtList);
+				{ Analyze all the strings on the board.  Return lists of CanKillCanSave }
+				
+			SpinCursor (+32);
+				
+			{$IFC DoTimers}
+			EndOfPhase (AnalStrPhase);
+			{$ENDC}
+			
+			CheckChanges ( @DocumentInfo,  @PointGraph );
+			{Heirarchy is stable.  Do any coloring changes resulting from 
+			analysis.}
+		
+			SpinCursor (+32);
+
+			{$IFC DoTimers}
+			EndOfPhase (ChkChgPhase);
+			{$ENDC}
+		
+			FriendGroupCount := 0; OpponentGroupCount := 0;
+			
+			GroupLifeMove (gH, RecommendedMoves);
+			
+			NewFriendValue := 0; { value of forming a new group, by cut or connect defend }
+			if FriendGroupCount >= TargetGroupMax then
+				NewFriendValue := AVGNEEDED * (TargetGroupMax - FriendGroupCount + 1) {Penalty!}
+			else if FriendGroupCount < TargetGroupMin then
+				NewFriendValue := AVGNEEDED * (TargetGroupMin - FriendGroupCount); {Bonus!}
+				
+			NewEnemyValue := 0; { value of forming a new enemy group, by cut or connect defend }
+			if OpponentGroupCount >= TargetGroupMax then
+				NewEnemyValue := AVGNEEDED * (OpponentGroupCount - TargetGroupMax + 1) {Bonus!}
+			else if OpponentGroupCount < TargetGroupMin then
+				NewEnemyValue := AVGNEEDED * (OpponentGroupCount - TargetGroupMin); {Penalty!}
+				
+			FewerFriendsValue := 0; { value of combining groups, by connect or cut defend }
+			if FriendGroupCount > TargetGroupMax then
+				FewerFriendsValue := AVGNEEDED * (FriendGroupCount - TargetGroupMax) {Bonus!}
+			else if FriendGroupCount <= TargetGroupMin then
+				FewerFriendsValue := AVGNEEDED * (TargetGroupMin - FriendGroupCount+1); {Penalty!}
+				
+			FewerEnemiesValue := 0; { value of opponent connecting groups, by connect or cut defend }
+			if OpponentGroupCount > TargetGroupMax then
+				FewerFriendsValue := AVGNEEDED * (TargetGroupMax - OpponentGroupCount) {Bonus!}
+			else if FriendGroupCount < TargetGroupMin then
+				FewerFriendsValue := AVGNEEDED * (TargetGroupMin - FriendGroupCount); {Penalty!}
+				
+			SpinCursor (+32);
+
+			{$IFC DoTimers}
+			EndOfPhase (GrpLifPhase);
+			{$ENDC}
+		
+			TacticalMove (gH, 
+				OpponentKillList, FriendSaveList, BlackHaneList, WhiteHaneList, UnPressingMove,
+				OpponentAtariPtList, RecommendedMoves);
+			
+			SpinCursor (+32);
+
+			{$IFC DoTimers}
+			EndOfPhase (TacMovPhase);
+			{$ENDC}
+		
+			JosekiMove (gH, RecommendedMoves, DoDevelopment);
+			
+			SpinCursor (+32);
+
+			{$IFC DoTimers}
+			EndOfPhase (JosMovPhase);
+			{$ENDC}
+		
+			if MaxKillSaveMove < CRITICAL_KILL_SAVE then
+				begin
+					if (NumActiveJoseki = 0) or (dBoardSize > 11) then
+						begin
+							while BlkCutWhtConnectStrings <> nil do
+								DoCutConnectStrings (gH, WhiteOcc {TargetStrColor}, 
+										BlkCutWhtConnectStrings, RecommendedMoves);
+							while WhtCutBlkConnectStrings <> nil do
+									DoCutConnectStrings (gH, BlackOcc {TargetStrColor}, 
+											WhtCutBlkConnectStrings, RecommendedMoves);
+						end;
+				end;
+				
+			ReturnToAvailList (@gH^.StringGraph, BlkCutWhtConnectStrings);
+			ReturnToAvailList (@gH^.StringGraph, WhtCutBlkConnectStrings);
+
+			SpinCursor (+32);
+						
+			{$IFC DoTimers}
+			EndOfPhase (CutConSPhase);
+			{$ENDC}
+				
+			if DoDevelopment then
+				ExtensionMove (gH, RecommendedMoves);
+			
+			SpinCursor (+32);
+						
+			{$IFC DoTimers}
+			EndOfPhase (ExtMovPhase);
+			{$ENDC}
+		
+			tempMove :=  nil; {pass is default}
+			tempAnal := nil; {BUG! if RecommendedMoves empty, called ReturnAnal with ??? }
+			
+			moveValue := MaxMoveValues;
+			while (moveValue >= 0) and (tempMove = nil) do
+				if RecommendedMoves [moveValue] <> nil then
+					begin
+						tempAnal := p2Analysis (Pop (@gH^.PointGraph, 
+								RecommendedMoves [moveValue]));
+								
+						{$IFC TraceMove}
+						write ('Choosing move: ');
+						with tempAnal^ do
+							begin
+								WriteAnalType (result);
+								write (' ');
+							end;
+						{$ENDC}
+						SpinCursor (-32);
+						
+						with tempAnal^ do
+							case result of 
+								GroupKill, OpponentKillAnal, 
+										MakeCutPointAnal, MakeConnectStringAnal: 
+									begin
+										with attackTree^ do
+											if TreeMoveX = 0 then
+												tempMove := nil {pass}
+											else
+												begin
+													tempMove := @dBoard [TreeMoveX, TreeMoveY];
+													if (result = GroupKill) or (result = MakeCutPointAnal) then
+														if not TestSafe (gH, tempMove, 
+																result = MakeCutPointAnal 
+																	{no Safety test forGroupKill!}) then
+															tempMove := nil;
+												end;
+									end;
+								DoubleAtariAnal, SingleAtariAnal:
+									begin
+										with attackTree^ do
+											if TreeMoveX = 0 then
+												tempMove := nil {pass}
+											else
+												tempMove := @dBoard [TreeMoveX, TreeMoveY];
+										if not TestSafe (gH, tempMove, true {Safety test}) then
+											tempMove := nil;
+									end;
+								HaneAnal :
+									begin
+										tempMove := p2GOPoint (target);
+										if not TestSafe (gH, tempMove, true {Safety test}) then
+											tempMove := nil;
+									end;
+								PressMove :
+									begin
+										tempMove := p2GOPoint (target);
+										if not TestSafe (gH, tempMove, true {Safety test}) then
+											tempMove := nil;
+									end;
+								GroupSave, FriendSaveAnal, DefendCutPointAnal, DefendConnectStringAnal: 
+									begin
+										with defendTree^ do
+											if TreeMoveX = 0 then
+												tempMove := nil {pass}
+											else
+												tempMove := @dBoard [TreeMoveX, TreeMoveY];
+									end;
+								JosekiMoveAnal:  
+									begin
+										tempMove := p2GOPoint (target);
+									end;
+								 ExtendMoveAnal: 
+									begin
+										tempMove := p2GOPoint (target);
+										if not TestSafe (gH, tempMove, true {Safety test}) then
+											tempMove := nil;
+									end;
+								otherwise
+									begin
+										{$IFC TraceMove}
+										GOEngineError('Bad ComputeMove result: ', moveValue, 1);
+										{$ENDC}
+									end;
+							end; {cases}
+						{$IFC TraceMove}
+						writeln;
+						{$ENDC}
+							
+						{ NOTE: if tempMove = nil at this point, and type of tempAnal
+							is OpponentKillAnal, then we are in a KO fight. (I think! kjf) }
+						{ Would be a good time to look for Ko threats and decide
+						1.  to fight with expectation of winning (more threats, bigger than target).
+						2.	to fight with expectation of loosing (fewer threats, or not big enough).
+						3.	to ignore the Ko until later, not big enough. (but it is "best move")
+									Note: a Ko is worth only 1/2 of a normal move, because opponet get
+										two moves in a row elsewhere }
+							
+						{$IFC TraceReturnAnalysis}
+						if TraceMakeMoves then
+							begin
+								write('Calling ReturnAnalysis for ComputeMove result ');
+								PrintPointItem(tempAnal^.target);
+								writeln;
+							end;
+						{$ENDC}
+						{ inside the while loop, in case some "Good" moves are "passes" }
+						ReturnAnalysis (@gH^.PointGraph, tempAnal);
+						
+					end
+				else
+					moveValue := moveValue - 1;
+			
+				if TraceMakeMoves then
+					begin
+						write(' Exit Compute Move: ');
+						if tempMove = nil then
+							write ('pass')
+						else with tempMove^ do
+							WritePoint (XCoord, YCoord);
+						write (' move value = ', moveValue:1);
+						writeln;
+					end;
+					
+				{$IFC DoTimers}
+				EndOfPhase (PickMovPhase);
+				{$ENDC}
+							
+				while moveValue >=0 do
+					begin
+						while RecommendedMoves[MoveValue] <> nil do
+							begin
+								tempAnal := p2Analysis (Pop (@gH^.PointGraph, 
+									RecommendedMoves [MoveValue]));
+								{$IFC TraceReturnAnalysis}
+								if TraceMakeMoves then
+									begin
+										write('Calling ReturnAnalysis for unused recommendation ');
+										PrintPointItem(tempAnal^.target);
+										write (' value: ', MoveValue:1);
+										writeln;
+									end;
+								{$ENDC}
+								ReturnAnalysis (@gH^.PointGraph, tempAnal);
+							end;
+						moveValue := moveValue - 1;
+					end;
+
+		end;  {with gH^}
+		
+	ComputeMove := tempMove;
+	
+end; {ComputeMove}
+
+procedure ThinkALittle;
+	begin
+	end; {ThinkALittle}
+
+procedure UndoThinking;
+	begin
+	end; {UndoThinking}

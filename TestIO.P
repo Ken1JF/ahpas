@@ -1,0 +1,292 @@
+{$I Flags.p}
+
+{$SETC doPerform := false} { for including Performance monitoring }
+
+program TestIO;
+
+uses
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	PasLibIntf, IntEnv,
+	Utilities,
+	
+	{$IFC doPerform}
+	Perf,
+	{$ENDC}
+	
+	Timers,
+	
+	GraphOps, BoardOps, AbstHier, GOAbstHier, GOBoards, StringKill, NearLife, GOMover;
+	
+var
+	fText: Handle;
+	numChars: longint;
+	
+	p2TestGOAbstHier: p2GOAbstHier;
+	p2TestJoseki: p2GOAbstHier;
+	
+	readJoseki: Boolean;
+	progress: Boolean;
+	timings: Boolean;
+	
+	{$IFC doPerform}
+	ThePGlobals: TP2PerfGlobals;
+	{$ENDC}	
+
+	
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+	
+	{ simulate a MacApp "Block Write" of entire text file }
+	procedure WriteOutput;
+		var line: str255; len, err: integer; nOut: integer; OutPtr, p: Ptr;
+		begin
+			numChars := GetHandleSize(fText);
+			nOut := 0;
+			while nOut < numChars do
+				begin
+					OutPtr := Ptr (ord4(fText^)+nOut);
+					p := OutPtr;
+					while p^ <> 13 do
+						begin
+							p := Ptr (ord4 (p) + 1);
+						end;
+					len := ord4(p) - ord4(OutPtr);
+					line [0] := chr(len);
+					if len > 0 then
+						BlockMove (OutPtr, Ptr (ord4 (@line) + 1), len);
+					writeln (output,line);
+					nOut := nOut+len+1;
+				end;
+
+			SetHandleSize (fText, 0);
+			(* FailMemError; *)
+	
+			DisposHandle (fText);
+			(* FailMemError; *)
+			fText := nil;
+	
+		end; {WriteOutput}
+
+var 
+	err: integer;
+procedure memerrProc;
+	begin
+		writeln (Diagnostic, 'Memory Error. ');
+		exit (TestIO);
+	end;
+
+function ReadBrdSize (pAbsH: p2GOAbstHier; nLine, hand: integer): p2GOAbstHier;
+	BEGIN
+		p2TestGOAbstHier := SetUpGOBoard (p2TestGOAbstHier, nline, hand, false); 
+		(* ResizeBoardWindow (nline); *)
+		ReadBrdSize := pAbsH;
+	END; {ReadBrdSize}
+	
+procedure Initialize;
+	var i: integer; argstr: IEStringPtr; errstr: String[255];
+	begin
+		PLHeapInit(50000, 10000, @memerrProc, true, true);
+		InitGraf (@ThePort);
+		
+		{ do gGOApplication.IGOApplication }
+		(* gErrorFlag := false; not used *)
+		gJosekiTree := nil;
+		readJoseki := true;
+		progress := false;
+		timings := false;
+		
+		with gEmptyTree do
+			begin
+				TreeMoveX := 0;
+				TreeMoveY := 0;
+				FirstContinuation := nil;
+				NextAlternative := nil;
+			end;
+			
+		{ process options }
+		for i := 1 to ArgC-1 do
+			begin
+				argstr := argv^[i];
+				if argstr^ <> '' then
+					if argstr^[1] = '-' then
+						case argstr^[2] of
+							'j': readJoseki := false;
+							'p': progress := not progress; { so can turn off after -t }
+							't': begin timings := true; progress := true; end;
+							otherwise
+								GOEngineError ('Bad option character', 0, 0);
+						end {cases}
+					else
+						GOEngineError ('Bad parameter', 0, 0);
+			end;
+
+		{ do MGO.p intialization }
+		SmallScreen := screenBits.bounds.bottom <= 420;
+		GetFNum ('N Helvetica Narrow', numberFont);
+		if numberFont = 0 then
+			numberFont := Courier;
+			
+		{ do gGOApplication.Run }
+
+		p2TestGOAbstHier := nil;
+		p2TestJoseki := nil;
+		p2TestGOAbstHier := SetUpGOBoard (p2TestGOAbstHier, 9, 0, false);
+		
+		if readJoseki then
+			begin
+				p2TestJoseki := SetUpGOBoard (p2TestJoseki, 19, 0, false);
+				if ReadInput (input, numChars, fText) then
+					begin
+						err :=  ReadGODoc (p2TestJoseki, fText, numChars, ReadBrdSize);
+						
+						if err <> 0 then
+							begin
+								Writeln (Diagnostic, '*** ReadGODoc error: ', err:1);
+								exit (TestIO);
+							end;
+							
+						if progress then
+							Writeln (Diagnostic, 'Read Joseki dictionary.');
+								
+						SetHandleSize(fText, 0);
+					end;
+				end;
+
+		DameToSave := 3;
+			
+	end; {Initialize}
+
+const
+	TestWriteDoc = false; { Set to true to test echoing document }
+	TestMakeMove = true;	{ Set to true to test making move }
+	
+var
+	legal: integer;
+	aPt: Point; 
+	AMove: p2GOPoint;
+	
+	Time0, Time1, StartTime, FinishTime: longint;
+	nProb: integer;
+
+begin {TestIO}
+
+	InitializePhaseTimers;
+	
+	GetDateTime (Time0);
+
+	Initialize;
+	
+	{$IFC doPerform}
+		ThePGlobals := nil;
+		if not InitPerf (ThePGlobals, 10{ms}, 2{bytes}, true, true, 'CODE',
+				0, '', true, 0{low RAM}, $4FFFFF{high RAM (5M)}, 16{default}) then
+			begin
+				writeln ('Errors during InitPerf.');
+				Exit (TestIO);
+			end;
+
+	GetDateTime (Time1);
+	if timings then
+		writeln (Diagnostic, 'Time to Initialize: ', Time1-Time0:1, ' secs.');
+
+	if PerfControl (ThePGlobals, True) then {turn on, throw away old state};
+	
+	{$ENDC}	
+		
+	nProb := 0;
+	StartTime := Time0;
+	EndOfPhase (StartPhase);
+
+	while ReadInput (input, numChars, fText) do
+		begin
+			
+			{ Note: adds a CR at the end of every line. }
+			{ May not be one at the end of file. }
+			
+			err :=  ReadGODoc (p2TestGOAbstHier, fText, numChars, ReadBrdSize);
+			
+			if err <> 0 then
+				begin
+					Writeln (Diagnostic, '*** ReadGODoc error: ', err:1);
+					exit (TestIO);
+				end;
+			
+			if progress then
+				begin
+					GetDateTime (Time1);
+					Writeln (Diagnostic, 'Solving ', p2TestGOAbstHier^.DocumentInfo.dTitle);
+				end;
+				
+			SetHandleSize(fText, 0);
+			
+			if TestMakeMove then
+				begin
+					writeln (p2TestGOAbstHier^.DocumentInfo.dTitle);
+					repeat
+						InvalidateAll (p2TestGOAbstHier, true);
+						AMove := ComputeMove (p2TestGOAbstHier, false {no Development});
+						legal := TryMakeMove (p2TestGOAbstHier, aPt, 
+								true {later: don't Tell User},
+								AMove, true {placePoint is known}, true {permanent});
+						if legal <> 0 then
+							writeln ('Illegal move: ', legal:1);
+					until legal = 0;
+					write('  Move = ');
+					if AMove <> nil then
+						with AMove^ do
+							WritePoint (XCoord, YCoord);
+					writeln;
+				end;
+			
+			if TestWriteDoc then
+				begin
+					with p2TestGOAbstHier^ do
+						fText := WriteGODoc (@DocumentInfo, err, numChars);
+					if err <> 0 then
+						begin
+							Writeln (Diagnostic, '*** WriteGODoc error: ', err:1);
+							exit (TestIO);
+						end;
+					
+					WriteOutput;
+					
+					SetHandleSize(fText, 0);
+					
+				end;
+			
+			nProb := nProb + 1;
+			
+			GetDateTime (Time1);
+			if timings then
+				writeln (Diagnostic, '  Time to solve: ', Time1-Time0:1, ' secs.');
+			Time0 := Time1;
+
+		end; {while }
+		
+	EndOfPhase (StopPhase);
+	
+	if timings then
+		ReportPhaseTimers (Diagnostic, false);
+	
+	GetDateTime (FinishTime);
+	Time1 := FinishTime-StartTime;
+	writeln (Diagnostic, nProb:3, ' Problems         ',
+					'  Total Time : ', (Time1 div 60):1, ':',
+					(Time1 - ((Time1 div 60)*60)):1, ' secs. = ', Time1/nProb:6:2, ' sec/test.');
+
+	{$IFC doPerform}
+	if PerfControl (ThePGlobals, False) then {turn off, throw away old state};
+
+	if PerfDump (ThePGlobals, 'Perform.out', false, 80) <> 0 then
+				writeln ('Errors during PerfDump.');
+		
+	TermPerf (ThePGlobals);
+	{$ENDC}	
+	
+	{$IFC doFindEdgeStats}
+	for legal := 0 to 20 do
+		writeln (legal:2, ' ', FindEdgeStats [legal]);
+	{$ENDC}	
+		
+end. {TestIO}

@@ -1,0 +1,586 @@
+*        *********************************************************
+*        * U T I L I T I E S	 A S S E M B L Y   R O U T I N E S *
+*        *					     *
+*        *		 Ira L. Ruben		     *
+*        *		   09/04/85		     *
+*        *********************************************************
+
+*        Only the volatile registers should be considered as clobbered by these
+*        routines (i.e., D0-D2/A0-A1).
+
+	STRING	ASIS
+	PRINT	NOGEN
+
+UpCh	PROC	EXPORT
+
+*        *******************************************
+*        *  UpCh - Convert character to	upper case *
+*        *******************************************
+
+*        FUNCTION UpCh(Ch: Char): Char;
+
+	MOVEA.L	(A7)+,A0		; Pop return into A0
+	MOVE.W	(A7)+,D0		; Pop Ch into D0
+	CMPI.B	#'a',D0		; 'a' <= Ch <= 'z' ?
+	BLT.S	@1
+	CMPI.B	#'z',D0
+	BGT.S	@1		; No
+	SUB.B	#$20,D0		; Yes, convert Ch to upper case
+@1	MOVE.W	D0,(A7)		; Set function result
+	JMP	(A0)		; Exit
+
+
+LowCh	PROC	EXPORT
+
+*        *******************************************
+*        * LowCh - Convert character to	lower case *
+*        *******************************************
+
+*        FUNCTION LowCh(Ch: Char): Char;
+
+	MOVEA.L	(A7)+,A0		; Pop return into A0
+	MOVE.W	(A7)+,D0		; Pop Ch into D0
+	CMPI.B	#'A',D0		; 'A' <= Ch <= 'Z' ?
+	BLT.S	@1
+	CMPI.B	#'Z',D0
+	BGT.S	@1		; No
+	ADD.B	#$20,D0		; Yes, convert Ch to lower case
+@1	MOVE.W	D0,(A7)		; Set function result
+	JMP	(A0)		; Exit
+
+
+UpStr	PROC	EXPORT
+
+*        ******************************************
+*        * UpStr - Convert a string to upper case	*
+*        ******************************************
+
+*        PROCEDURE UpStr(S: StringPtr);
+
+	MOVEA.L	(A7)+,A1		; Pop return into A1
+	MOVEA.L	(A7)+,A0		; Pop string ptr S into A0
+	CLR.W	D1
+	MOVE.B	(A0)+,D1		; Set D1 to length of string,	point at S[1]
+	BRA.S	@3		; Hop into loop
+@1
+	MOVE.B	(A0),D0		; Pick up	char from	S[i]
+	CMPI.B	#'a',D0		; 'a' <= char <= 'z' ?
+	BLT.S	@2
+	CMPI.B	#'z',D0
+	BGT.S	@2		; No
+	SUB.B	#$20,D0		; Yes, convert char	to upper case
+@2	MOVE.B	D0,(A0)+		; Put char back into S[i]
+@3	DBF	D1,@1		; Scan entire string
+	JMP	(A1)		; Exit
+
+
+LowStr	PROC	EXPORT
+
+*        *******************************************
+*        * LowStr -	Convert a	string to	lower case *
+*        *******************************************
+
+*        PROCEDURE LowStr(S: StringPtr);
+
+	MOVEA.L	(A7)+,A1		; Pop return into A1
+	MOVEA.L	(A7)+,A0		; Pop string ptr S into A0
+	CLR.W	D1
+	MOVE.B	(A0)+,D1		; Set D1 to length of string,	point at S[1]
+	BRA.S	@3		; Hop into loop
+@1
+	MOVE.B	(A0),D0		; Pick up	char from	S[i]
+	CMPI.B	#'A',D0		; 'A' <= char <= 'Z' ?
+	BLT.S	@2
+	CMPI.B	#'Z',D0
+	BGT.S	@2		; No
+	ADD.B	#$20,D0		; Yes, convert char	to upper case
+@2	MOVE.B	D0,(A0)+		; Put char back into S[i]
+@3	DBF	D1,@1		; Scan entire string
+	JMP	(A1)		; Exit
+
+
+EqStr	PROC	EXPORT
+
+*        *************************************************************************
+*        * EqStr	- Compare	two strings for equality	     (ignoring case) *
+*        * EqStrCst	- Compare	a string against a string constant (ignoring case) *
+*        *************************************************************************
+
+*        FUNCTION EqStr(S1, S2: StringPtr): Boolean;
+*        FUNCTION EqStrCst(S1: StringPtr; S2: Str255): Boolean;
+
+	EXPORT	EqStrCst
+EqStrCst
+	MOVE.L	(A7)+,D2		; Pop return into D2 for a moment
+	MOVEA.L	(A7)+,A1		; Point A1 at second string S2
+	MOVEA.L	(A7),A0		; Point A0 at first	string S1
+	MOVE.L	D2,(A7)		; Repush return
+	CLR.W	D2
+	MOVE.B	(A0),D2		; Pick up	length of	S1
+	CMPM.B	(A0)+,(A1)+	; Are lengths of S1	and S2 the same
+	BEQ.S	@4		; Yes, jump into compare loop
+@0				; Mismatch
+	MOVE.L	(A7)+,A0		; Pop return into A0
+	CLR.B	(A7)		; Return False for function result
+	JMP	(A0)		; Exit
+@1
+	MOVE.B	(A0)+,D0		; Pick up	S1[i]
+	CMPI.B	#'a',D0		; 'a' <= S1[i] <= 'z' ?
+	BLT.S	@2
+	CMPI.B	#'z',D0
+	BGT.S	@2		; No
+	SUB.B	#$20,D0		; Yes, convert S1[i] to upper	case
+@2
+	MOVE.B	(A1)+,D1		; Pick up	S2[i]
+	CMPI.B	#'a',D1		; 'a' <= S2[i] <= 'z' ?
+	BLT.S	@3
+	CMPI.B	#'z',D1
+	BGT.S	@3		; No
+	SUB.B	#$20,D1		; Yes, convert S2[i] to upper	case
+@3
+	CMP.B	D0,D1		; Does S1[i] = S2[i] ?
+	BNE.S	@0		; No, the	strings don't match
+@4
+	DBF	D2,@1		; Count characters and loop
+
+	MOVE.L	(A7)+,A0		; Pop return into A0
+	MOVE.B	#1,(A7)		; Return True for function result
+	JMP	(A0)		; Exit
+
+
+TrimLeading PROC	  EXPORT	
+
+*        *************************************
+*        * TrimLeading - Trim	leading blanks *
+*        *************************************
+
+*        PROCEDURE TrimLeading(S: StringPtr);
+
+	MOVE.L	(A7)+,D0		; Pop return into D0 for a moment
+	MOVEA.L	(A7),A0		; Point A0 at string
+	MOVE.L	D0,(A7)		; Repush return
+	MOVEA.L	A0,A1		; Save a copy of A0	in A1 to set length	later
+	CLR.W	D1
+	MOVE.B	(A0)+,D1		; Get length of string
+	BRA.S	@2		; Scan left-to-right for first non-blank
+@1
+	MOVE.B	(A0)+,D0		; Pick up	a char
+	CMPI.B	#' ',D0		; Have a blank ?
+	BEQ.S	@2		; Yes
+	CMPI.B	#$09,D0		; Have a tab ?
+	BNE.S	@3		; No, we have 1st non-blank char
+@2
+	DBF	D1,@1		; Count char and loop until non-blank found
+	CLR.B	(A1)		; Set the	length of	the string to 0
+	RTS			; Exit
+@3
+	ADDQ.W	#1,D1		; Set length with leading blanks deleted
+	CMP.B	(A1),D1		; Were any leading blanks seen ?
+	BEQ.S	@6		; No, lengths are the same, so just exit
+	MOVE.B	D1,(A1)+		; Yes, update length to reflect deleted	blanks
+	MOVE.B	D0,(A1)+		; Copy 1st non-blank to 1st char of string
+	BRA.S	@5
+@4
+	MOVE.B	(A0)+,(A1)+	; Move remaining chars left in string
+@5	DBF	D1,@4
+@6	RTS			; Exit
+
+
+TrimTrailing PROC	   EXPORT	
+
+*        ****************************************
+*        * TrimTrailing - Trim trailing	blankls *
+*        ****************************************
+
+*        PROCEDURE TrimTrailing(S: StringPtr);
+
+	MOVEA.L	(A7)+,A1		; Pop return into A1
+	MOVEA.L	(A7)+,A0		; Point A0 at string
+	CLR.W	D1
+	MOVE.B	(A0),D1		; Get length of string
+	BRA.S	@2		; Scan right-to-left for 1st non-blank
+@1
+	CMPI.B	#' ',1(A0,D1.W)	; Have a blank ?
+	BEQ.S	@2		; Yes
+	CMPI.B	#$09,1(A0,D1.W)	; Have a tab
+	BNE.S	@3		; No, we have last non-blank char
+@2	DBF	D1,@1		; Scan right to left
+@3
+	ADDQ.W	#1,D1		; Delete blanks from string
+	MOVE.B	D1,(A0)		; By cutting back the length
+	JMP	(A1)		; Exit
+
+
+TrimBlanks PROC	 EXPORT	
+
+*        *************************************************
+*        * TrimBlanks - Trim leading and trailing	blanks *
+*        *************************************************
+
+*        PROCEDURE TrimBlanks(S: StringPtr);
+
+	IMPORT	TrimLeading
+	IMPORT	TrimTrailing
+
+	MOVE.L	4(A7),-(A7)	; Push copy of string ptr onto stack
+	JSR	TrimLeading	; Trim leading blanks
+	JMP	TrimTrailing	; Trim trailing and	exit from	there
+
+
+Koncat	PROC	EXPORT
+	EXPORT 	KoncatCst
+
+
+*        ************************************
+*        * Koncat -	Concatenate two strings *
+*        ************************************
+
+*        PROCEDURE Koncat (S1,	S2: StringPtr);
+*        PROCEDURE KoncatCst (S1: StringPtr; S2: Str255);
+
+KoncatCst	EQU	*
+	MOVE.L	(A7)+,D2		; Pop return into D2 for a moment
+	MOVEA.L	(A7)+,A1		; Point A1 at S2
+	MOVEA.L	(A7),A0		; Point A0 at S1
+	MOVE.L	D2,(A7)		; Repush return
+	CLR.W	D0
+	MOVE.B	(A0),D0		; Pick up	length of	S1
+	CLR.W	D1
+	MOVE.B	(A1)+,D1		; Pick up	length of	S2
+	ADD.B	D1,(A0)+		; Add to current length of S1
+	ADDA.W	D0,A0		; Point at 1st free	byte in S1
+	BRA.S	@2
+@1
+	MOVE.B	(A1)+,(A0)+	; Concatenate S2 to	S1
+@2	DBF	D1,@1
+	RTS			; Exit
+
+
+SetStr	PROC	EXPORT
+
+*        *****************************************************************
+*        * SetStr -	Copy substring of Src, starting at Src[Start] to Dst.*
+*        *****************************************************************
+
+*        PROCEDURE SetStr(Src, Dst: StringPtr);
+
+	MOVE.L	(A7)+,D2		; Pop return into D2 for a moment
+	MOVEA.L	(A7)+,A1		; Point A1 at Dst
+	MOVEA.L	(A7),A0		; Point A0 at Src
+	MOVE.L	D2,(A7)		; Repush return
+	CLR.W	D1
+	MOVE.B	(A0),D1		; Pick up	length of	Src
+@1
+	MOVE.B	(A0)+,(A1)+	; Copy Src to Dst
+	DBF	D1,@1
+	RTS			; Exit
+
+
+CopyStr	PROC	EXPORT
+
+*        *****************************************************
+*        * CopyStr - Copy substring of source to destination *
+*        *****************************************************
+
+*        PROCEDURE CopyStr(Src, Dst: StringPtr; Start, Count: Integer);
+
+	MOVE.L	(A7)+,D2		; Pop return in D2 for a moment
+	MOVE.W	(A7)+,D1		; Pop count into D1
+	MOVE.W	(A7)+,D0		; Pop start index into D0
+	MOVEA.L	(A7)+,A1		; Point A1 at the Dst string
+	MOVEA.L	(A7),A0		; Point A0 at the Src string
+	MOVE.L	D2,(A7)		; Repush return
+
+	MOVE.B	D1,(A1)+		; Set the	length of	Dst as the count value
+	ADDA.W	D0,A0		; Point A0 at Src[start]
+	BRA.S	@2
+@1
+	MOVE.B	(A0)+,(A1)+	; Copy Src[start] to Dst for count chars
+@2	DBF	D1,@1
+	RTS			; Exit
+
+
+IntToStr	PROC	EXPORT
+
+*        ***************************************************
+*        * IntToStr	- Convert	a (long) integer to	a string *
+*        ***************************************************
+
+*        FUNCTION IntToStr(N:	LongInt; Width: Integer; HexStr: Boolean): StringPtr;
+
+*        IntToStr converts the (long) integer N to a string. IF Width>0 and
+*        Width>length(string), then the	number will be right-justified in a string
+*        of width characters.	If Width<0 and Abs(Width)>length(string), then the
+*        number is again right-justified but padded with leading zeros instead of
+*        blanks.  In this case a negative number will have a minus as	its first
+*        character.	Caution, do not do two calls to this function in any one Concat!}
+
+*        Stack frame layout:
+
+ResultStr	EQU	16		; Function result (ptr to a string)
+N	EQU	12		; Value to convert
+Width	EQU	10		; Field width
+HexStr	EQU	 8		; True ==> convert to hex string
+
+RetAddr	EQU	 4		; Return (RTS) address
+LinkA6	EQU	 0		; Caller's A6
+
+S	EQU	-12		; Place to create unformatted	string
+
+LocalSize	EQU	-12		; Size of	local stack frame
+ParamSz	EQU	ResultStr-HexStr	; Param list size
+
+	DATA
+StrResult	DS.B	256		; String result pointed to by ResultStr
+	CODE
+
+*        Register conventions: D4.L = value (N)
+*			 D5.B = True ($01) if N < 0
+*			 D6.W = Length of converted string
+*			 A3.L = Ptr to converted string
+*			 A4.L = Ptr to string function result
+
+	IMPORT	%I_MOD4,%I_DIV4
+
+Init	LINK	A6,#LocalSize	; Allocate our local stack frame
+	MOVEM.L	D3-D7/A3-A4,-(A7)	; Save some non-volatile regs	we will need
+	LEA	S+12(A6),A3	; Point A3 at right	end of our string
+	CLR.B	D5		; Assume N is positive
+	MOVE.L	N(A6),D4		; Set D4 with value	of N
+	BNE.S	NonZeroN		; If N <>	0 then hop
+ZeroN
+	MOVE.B	#'0',-(A3)	; Set '0'	in string	if N is 0
+	MOVEQ	#1,D6		; Set length to 1
+	BRA.S	FormatS		; Hop to format S into result	string
+NonZeroN
+	TST.B	HexStr(A6)	; Convert	value to hex string	or decimal ?
+	BEQ.S	CvtDec		; If HexStr = False, hop
+CvtHex
+	MOVEQ	#7,D1		; Convert	all 8 nibbles of the long value
+	CLR.W	D6		; Init length to 0
+HexLoop
+	MOVE.B	D4,D0		; Convert	nibbles left to right
+	ANDI.W	#$F,D0
+	MOVE.B	HexTbl(D0.W),-(A3)	; Put char nibble into our string buffer
+	ADDQ.W	#1,D6		; Update length of string
+	LSR.L	#4,D4		; Set up for next nibble
+	BEQ.S	FormatS		; If rest	of nibbles are 0, go format string
+	DBF	D1,HexLoop	; Loop through all the nibbles
+	BRA.S	FormatS		; Now the	string is	ready for	formatting
+
+HexTbl	DC.B	'0123456789ABCDEF'	; Guess what this is!
+
+CvtDec
+	MOVEQ	#10,D7		; We will	need 10 as a radix here
+	CLR.W	D6		; Init length to 0
+	TST.L	D4		; Is N < 0 ?
+	BGE.S	DecLoop		; No
+	MOVEQ	#1,D5		; Yes, D5	will indicate value	was negative
+	NEG.L	D4		; Make value positive to convert it
+DecLoop
+	MOVE.L	D4,-(A7)		; Get right-most digit
+	MOVE.L	D7,-(A7)
+	JSR	%I_MOD4		; Digit := N MOD 10	 (using Pascal's MOD!)
+	MOVE.L	(A7)+,D0		; Get resulting digit
+
+	ADD.W	#'0',D0		; Convert	digit to a character
+	MOVE.B	D0,-(A3)		; Put digit character into our string buffer
+	ADDQ.W	#1,D6		; Update length of string
+
+	MOVE.L	D4,-(A7)		; Now that we have the digit converted...
+	MOVE.L	D7,-(A7)		; ...we may delete it from the value
+	JSR	%I_DIV4		; N := N DIV 10  (using Pascal's DIV)
+	MOVE.L	(A7)+,D4
+	BNE.S	DecLoop		; Loop until N goes	to zero (it really will!)
+
+	TST.B	D5		; Are we converting	a negative value ?
+	BEQ.S	FormatS		; No
+	MOVE.B	#'-',-(A3)	; Yes, add in sign
+	ADDQ.W	#1,D6		; and count the character
+FormatS
+	LEA	StrResult(A5),A4	; Might as well set	function result now
+	MOVE.L	A4,ResultStr(A6)	
+	MOVEA.L	A4,A0		; A0 will	point to current byte in string
+	ADDQ.W	#1,A0		; Initially it points at 1st char
+
+	MOVE.B	#' ',D1		; Assume filler (if	any) is blanks
+	MOVE.W	Width(A6),D7	; Get width
+	BGE.S	@1		; If positive, hop
+	NEG.W	D7		; If negative, make	width positive
+	MOVE.B	#'0',D1		; Negative width means filler	is to be 0's
+@1
+	SUB.W	D6,D7		; Get length of padding on left
+	BLE.S	CopyLoop		; If no padding, use converted string as-is
+	CMPI.B	#'0',D1		; Are we going to pad with 0's
+	BNE.S	@3		; No, just pad result string on left
+	TST.B	D5		; Yes, but was a leading "-" put on ?
+	BEQ.S	@3		; No, still just do	the padding
+	MOVE.B	#'-',(A0)+	; Yes, 1st pad char	will be the "-"
+	MOVE.B	#'0',(A3)		; Change sign in our buffer to a "0"
+	SUBQ.W	#1+1,D7		; Adjust padding count (1 for	"-", 1 for DBF)
+	BMI.S	CopyLoop		; If no more paddig	is needed, just hop
+@2
+	MOVE.B	D1,(A0)+		; Pad resulting string on the	left
+@3	DBF	D7,@2
+	BRA.S	CopyLoop		; Our string concat's to padding
+SetResult
+	MOVE.B	(A3)+,(A0)+	; Copy our string to the result
+CopyLoop	DBF	D6,SetResult	; D6 is length of our string
+
+	MOVE.L	A0,D0		; Set final length of result string
+	SUB.L	A4,D0		; Length = A0 - A4 - 1
+	SUBQ.B	#1,D0		;        = Next position - start - 1
+	MOVE.B	D0,(A4)
+
+	MOVEM.L	(A7)+,D3-D7/A3-A4	; Restore	saved registers
+	UNLK	A6		; Unlink our local stack frame
+	MOVEA.L	(A7)+,A0		; Pop return address into A0
+	ADDA.W	#ParamSz,A7	; Pop stack past the parameters
+	JMP	(A0)		; Exit
+
+
+StrToInt	PROC	EXPORT
+
+*        *********************************************
+*        * StrToInt	- Convert	a string to an integer *
+*        *********************************************
+
+*        FUNCTION StrToInt(NS: StringPtr; VAR cState: nState): LongInt;
+
+ResultInt	EQU	16		; Function result LongInt value
+NS	EQU	12		; Ptr to string to scan
+cState	EQU	8		; Ptr to cState
+
+RetAddr	EQU	4		; Return (RTS) address
+LinkA6	EQU	0		; Caller's A6
+
+Negative	EQU	-2		; True ($FF) ==> negative value
+S	EQU	-258		; Local string copy	of NS to scan
+
+LocalSize	EQU	-258		; Size of	local stack frame
+ParamSz	EQU	ResultInt-cState	; Param list size
+
+nValid	EQU	0		; cState = nValid	 ==> conversion ok
+nNull	EQU	1		; cState = nNull	 ==> NS is a null string
+nBad	EQU	2		; cState = nBad	 ==> invalid format
+nOverFlow	EQU	3		; cState = nOverflow ==> number too big
+
+*        Register conventions: D4.L = Current value
+*			 D5.B = Working copy of cState value
+*			 D6.B = Current digit character
+*			 D7.W = Nbr of char	remaining	to scan in string at A3
+*			 A3.L = Ptr to current char in string being scanned
+
+	IMPORT	%I_MUL4
+	IMPORT	SetStr,TrimBlanks,UpCh
+
+Init	LINK	A6,#LocalSize	; Allocate our local stack frame
+	MOVEM.L	D3-D7/A3,-(A7)	; Save some non-volatile regs	we will need
+	LEA	S(A6),A3		; Set A3 to scan from our string
+	MOVE.L	NS(A6),-(A7)	; Copy NS	to S to protect caller's string
+	MOVE.L	A3,-(A7)
+	JSR	SetStr		; SetStr(NS, @S);
+	MOVE.L	A3,-(A7)		; Take leading/trailing blanks off our S
+	JSR	TrimBlanks	; TrimBlanks(@S);
+	CLR.L	D4		; Init our value accumulator
+	MOVE.B	#nValid,D5	; Assume conversion	will go ok
+	CLR.B	Negative(A6)	; Assume the value is positive
+	CLR.L	D6		; D6 will	contain each digit to add to value
+
+	CLR.W	D7		; Set up length of string
+	MOVE.B	(A3)+,D7
+	BNE.S	NotNull		; If there is something to scan, hop
+	MOVEQ	#nNull,D5		; If null, set cState
+	BRA	SetResult		; Hop to set result
+NotNull
+	MOVEQ	#10,D3		; Set up default radix multiplier
+	MOVE.B	(A3),D6		; Pick up	1st char of string
+	CMPI.B	#'+',D6		; Have a leading "+" ?
+	BEQ.S	@1		; Yes
+	CMPI.B	#'-',D6		; Have a leading "-" ?
+	BNE.S	ScanSetup		; No
+	ST	Negative(A6)	; Yes, set switch to negate value later
+@1	ADDQ.W	#1,A3		; Point A3 at char following sign
+	SUBQ.W	#1,D7		; Count sign character as processed
+	BNE.S	ScanSetup		; If not null, continue scanning
+BadValue	
+	MOVEQ	#nBad,D5		; If only	a sign, it's a bad format
+	CLR.L	D4		; Return 0 for bad values
+	BRA	SetResult		; Just go	set the result
+ScanSetup	CMPI.B	#'$',D6		; Have a leading "$" ?
+	BNE.S	Setup2		; No
+	MOVEQ	#$10,D3		; Set up hex radix multiplier
+	ADDQ.W	#1,A3		; Point A3 at char following "$"
+	SUBQ.W	#1,D7		; Count "$" character as processed
+	BNE.S	Setup2		; If not null, continue scanning
+	BRA.S	BadValue
+	
+Setup2	SUBQ.W	#1,D7		; Adjust count so we may use DBcc's
+Scan0s
+	MOVE.B	(A3)+,D6		; Get next character
+	CMPI.B	#'0',D6		; Have a leading 0 ?
+	DBNE	D7,Scan0s		; Scan off the leading 0's
+	BEQ.S	SetResult		; If all 0's, just set the result
+
+	CLR.W	D2		; Count significant	digits
+DecLoop
+	CMPI.B	#'0',D6		; Have an	decimal digit ?
+	BLT.S	BadValue		; No
+	CMPI.B	#'9',D6
+	BLE.S	@OKDec		; Yes
+	CMPI.B	#$10,D3		; Are we Doing Hex ?
+	BNE.S	BadValue
+	CLR.W	-(A7)
+	MOVE.W	D6,-(A7)		; char, in low-order byte
+	JSR	UpCh
+	MOVE.W	(A7)+,D6
+	CMPI.B	#'A',D6		; Have an	decimal digit ?
+	BLT.S	BadValue		; No
+	CMPI.B	#'F',D6
+	BGT.S	BadValue		; No
+	
+@OKHex	SUB.W	#$37,D6		; -'A'+10
+@Hex2	CMPI.B	#8,D2		; Have we	collected	at least 8 digits ?
+	BGE.S	BadValue
+	BRA.S	@2
+	
+@OKDec	SUB.W	#'0',D6
+	CMPI.B	#$10,D3		; Are we Doing Hex ?
+	BEQ.S	@Hex2
+	CMPI.B	#9,D2		; Have we	collected	at least 10 digits ?
+	BLE.S	@1		; No, we're still ok
+@0
+	MOVEQ	#nOverFlow,D5	; Yes, we	have an overflow condition
+	CLR.L	D4		; Return 0 for bad values
+	BRA.S	SetResult		; Just go	set the result
+@1
+	BNE.S	@2		; If exactly 10 digits
+	CMPI.L	#214748364,D4	; and Value > 214748364
+	BGT.S	@0		; Then there is no way to allow another	digit
+	BNE.S	@2		; If Value = 214748364
+	CMPI.B	#'7',D6		; Then all digits <= "7" are ok
+	BGT.S	@0
+@2
+	MOVE.L	D3,-(A7)		; Value := Value*10	+ digit
+	MOVE.L	D4,-(A7)
+	JSR	%I_MUL4		; Using Pascal multiply !
+	MOVE.L	(A7)+,D4
+	ADD.L	D6,D4
+	ADDQ.W	#1,D2		; Count the digit
+	MOVE.B	(A3)+,D6		; Pick up	next digit character
+	DBF	D7,DecLoop	; Continue scanning
+SetResult
+	TST.B	Negative(A6)	; Should the value be negated
+	BEQ.S	@1		; No
+	NEG.L	D4		; Yes
+@1	MOVE.L	D4,ResultInt(A6)	; Set result value
+	MOVEA.L	cState(A6),A0
+	MOVE.B	D5,(A0)		; Set cState
+
+	MOVEM.L	(A7)+,D3-D7/A3	; Restore	saved registers
+	UNLK	A6		; Unlink our local stack frame
+	MOVEA.L	(A7)+,A0		; Pop return address into A0
+	ADDA.W	#ParamSz,A7	; Pop stack past the parameters
+	JMP	(A0)		; Exit
+
+	END

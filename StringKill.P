@@ -1,0 +1,127 @@
+{	StringKill		Pascal Unit
+
+	DESCRIPTION
+        StringKill : Answers the tactical question, can a given string be killed/saved using 
+        a certain specific tactic, such as Ladder attack (implemented) or Getta (not yet) ?
+	AUTHOR
+			Arthur Molin
+            Copyright 1988
+			All Rights Reserved.
+
+	BUGS
+	
+	IMPROVEMENTS
+}
+
+
+{$I Flags.p}
+
+UNIT StringKill;
+
+INTERFACE
+
+USES
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	GraphOps, BoardOps, AbstHier,   
+	{GOGlobal,} GOAbstHier,GoBoards,
+	Timers,
+	CursorCtl,
+  	Utilities; 
+
+	{ Because AnalysisInvalidated lists get old and longer than needed, they
+	  are periodically cleaned up. }
+
+const
+	INVALIDATE_AFTER = 25; { machine moves }
+var
+	LastInvalidationCleanUp: integer;
+
+		{These variables are used by KillString, SaveString, and StringStatus,
+		 and need to be set before calling those functions. }
+	TryingToKill : boolean;
+	DameToSave : integer;  {This is used by ValidateAnalysis and LadderBroken.}
+	CycleLimit : integer; { used by KillString and SaveString to detect cyclic captures. }
+
+{$IFC TraceStringKill}
+	TraceIndent: integer;
+{$ENDC}
+
+CONST
+	DEPTH_OF_SEARCH = 70;  { passed to StringStatus for the depth of search. }
+	SEARCH_NODE_LIMIT = 100; 
+
+
+procedure SetCycleLimit (targPt: p2GOPoint);
+	{ temporary, until status of parameters and global variables is straightened out.}
+	
+		{ Default functions to pass to StringStatus }
+function LadderBroken (Defender : p2Node):boolean;
+		   { Note: static function, does not do dynamic analysis }
+		
+function KillWithLadder (g : p2Graph; Defender : p2Node):p2ListItem;
+		   { Note: static function, does not do dynamic analysis }
+
+function RunFromLadder (g: p2Graph {StringGraph}; 
+		        Defender: P2Node {GoString}) : p2ListItem;
+		   { Note: static function, does not do dynamic analysis }
+				
+function StringStatus (gH : p2GOAbstHier;  DefendStrPt : p2GOPoint; 
+		Depth : integer; MaxNodes: integer; DoingInvalidates: Boolean;
+		 
+		function KillTactic (g : p2Graph; Defender : p2Node):p2ListItem;
+			{ procedure that returns list of moves to try }
+			{ Note: static function, does not do dynamic analysis }
+		
+		function SaveTactic(g : p2Graph; Defender : p2Node):p2ListItem; 
+			{ procedure defender will use to save the stones }
+			{ Note: static function, does not do dynamic analysis }
+		
+		function Saved(Defender : p2Node):boolean
+			{ function that returns true when the defender is saved }
+			{ Note: static function, does not do dynamic analysis }
+		
+		 { xxx Later: Evaluation Function}): p2Analysis;
+		 
+	{ Calculate and return the status of a string on the board. }
+	{ Does not store the analysis on the board points of the string. }
+
+procedure WriteStringStatus (SS: integer);
+
+procedure AddToInvalidList (pDoc : p2DocInfo; g: p2Graph; DefendStrPt, ChangePt : p2GoPoint);
+
+procedure InvalidAnalysisAt ( gH : p2GoAbstHier; atPt : p2GoPoint);
+	{ Called to invalidate the analysis stored at a board point. }
+	{ Only called by DoInvalid (after a move) and to clear all analysis. }
+
+procedure BeginInvalidate (gH : p2GOAbstHier; MovePt : p2GOPoint );
+	{ This routine begins the Invalidation process after a move at MovePt. }
+	{ It pushes the strings to be updated on the documents Invalidate list. }
+	{ and returns. }
+
+function ContinueInvalidate (gH : p2GOAbstHier ): Boolean;
+	{ This routine continues the Invalidation process. }
+	{ It pops one strings to be updated from the documents Invalidate list, }
+	{ and performs the analysis validation.  Returns false if the list is empty. }
+
+procedure EndInvalidate (gH : p2GOAbstHier );
+	{ This routine finishes the Invalidation process. }
+	{ It pops all strings to be updated from the documents Invalidate list, }
+	{ and performs the analysis validation. }
+	
+procedure InvalidateAll (gH :p2GOAbstHier; DoIncremental: Boolean);
+	{ This routine forces an invalidation for all Strings on the board. }
+	{ Should be called for initial ComputeMove and at "strange" times, }
+	{ like a user requests to take back a move. }
+
+function GetStatus (gH : p2GoAbstHier; atPt : p2GoPoint) : p2Analysis;
+	{ Return the current status of a permanent string point on the board. }
+	{ If one does not exist, computes it and stores it on the board. }
+	{ DO NOT call this for temporary plays during analysis. }
+
+
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I StringKill2.p}
+END. {StringKill}

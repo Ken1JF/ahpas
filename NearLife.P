@@ -1,0 +1,45 @@
+{	NearLife		Pascal Unit
+
+	DESCRIPTION
+         NearLife : Answers tactical questions at the block/group level.
+			Currently : Is this block/group alive if one more play is mode?
+			
+	AUTHOR
+			Arthur Molin
+            Copyright 1988
+			All Rights Reserved.
+
+	BUGS
+	
+	IMPROVEMENTS
+	     Not yet implementing David Benson's algorithm exactly.
+		  One hack : healthy "eye's" are not allowed to include any opposing stones.
+}
+
+{$I Flags.p}
+
+UNIT NearLife;
+
+INTERFACE
+
+USES
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	GraphOps, BoardOps, AbstHier,   
+	{GOGlobal,} GOAbstHier,GoBoards,StringKill,
+  	Utilities; 
+	
+function NumBlkPoints (b: P2Node): integer;
+
+procedure FindSafety(gH:p2GoAbstHier; Grp: p2Node{Group to be checked}; BlockColor : TStringType;
+			var HealthyEyes, UnHealthyEyes, UnVitalEyes, TrueEyes, Strings, SafeStrings : p2ListItem);
+
+procedure CreateLife1(gH : p2GOAbstHier; Grp : p2Node; var Safe : boolean; 
+						var NextMove : p2GoPoint);
+
+
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I NearLife2.p}
+END. {NearLife}

@@ -1,0 +1,64 @@
+{	GOExtensions		Pascal Unit
+
+	DESCRIPTION
+        GOExtensions : Given a group, recommend the best extensions off of it.
+		
+	AUTHOR
+			Arthur Molin
+            Copyright 1988
+			All Rights Reserved.
+
+	BUGS
+	
+	IMPROVEMENTS
+}
+
+
+{$I Flags.p}
+
+UNIT GOExtensions;
+
+INTERFACE
+
+USES
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	GraphOps, BoardOps, AbstHier,   
+	{GOGlobal,} GOAbstHier,GoBoards,
+  	Utilities; 
+
+const
+{$IFC TraceMove}
+	TraceMakeMoves = true;
+	TraceDistance = false;
+{$ELSEC}
+	TraceMakeMoves = false;
+	TraceDistance = false;
+{$ENDC}
+ 	VeryWeak = 0;
+	Weak = 1;
+	Intermediate = 2;
+	Strong = 3;
+	VeryStrong = 4;
+
+function ExtendOff (gH : p2GoAbstHier; Grp : p2Node; GetTerr : boolean) : p2Analysis;
+	{ ExtenfOff returns an Extension move represented as a p2Analysis. }
+	{ "target" is a p2GOPoint coerced into p2Node, which is point to move. }
+	{ "result" is value of move. }
+	{ GetTerr is true fi the purpose of the extension is to grab open territory. }
+
+function GroupDame(p : p2Node) : integer;
+
+function FindGroupContactPoints (gH : p2GOAbstHier; Grp1, Grp2:p2Node) : p2ListItem;
+	{ The list returned contains a pair of p2GoPoints, the first a point }
+	{ of Grp1, the second a point of Grp2, and the points are adjacent. }
+
+procedure PrintList (l : p2ListItem);
+
+procedure PrintGroupItem (G : p2Node);
+
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I GOExtensions2.p}
+END. {GOExtensions}

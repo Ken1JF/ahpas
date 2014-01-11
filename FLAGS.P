@@ -1,0 +1,45 @@
+{$SETC DebugDraw := true} { controls the inclusion of debug drawing logic }
+{$SETC DoTimers := true}
+
+{$SETC TraceInit := false}	{ Macsbug, when nothing works ... }
+{$SETC TraceAbst := false} { include the Trace Update code (run-time control) }
+{$SETC TraceRequest := false} 
+{$SETC TraceConnects := false}
+{$SETC TraceExtensions := false}
+{$SETC TraceMakeLife := false} {use this to find Rabbity-six bug?}
+{$SETC TraceMove := false}				{Controls debugging in GoMover.}
+{$SETC TraceMakeMove := false}	{Controls debugging in GoBoards.}
+{$SETC TraceStringKill := false} 
+{$SETC TraceReturnAnalysis := false} { used to trace calls to ReturnAnalysis }
+{$SETC TraceAnalysisResults := false} { traces calls to DoInvalid }
+{$SETC TraceJoseki := false} {Iterators, tests, etc.}
+{$SETC TraceJosekiMoves := false} {Joseki and Fuseki logic}
+
+{$SETC doFindEdgeStats := false}
+{$SETC doArcListCounts := false}
+
+
+{$SETC RangeChk := false} { for using in restoring }
+	{$IFC RangeChk}
+		{$R+}
+	{$ELSEC}
+		{$R-}
+	{$ENDC}
+	
+{$SETC DebugSym := true } 
+	{$IFC DebugSym}
+		{$D+}
+		{$N+}
+	{$ELSEC}
+		{$R-}
+		{$N-}
+	{$ENDC}
+	
+{$SETC ExtraChks := false } 
+	{$IFC ExtraChks}
+		{$OV+}	{Check for arithmetic overflows}
+		{$H+}		{Check dereferencing of Handles}
+	{$ELSEC}
+		{$H-}		{Don't Check dereferencing of Handles}
+		{$OV-}	{Check for arithmetic overflows}
+	{$ENDC}

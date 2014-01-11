@@ -1,0 +1,517 @@
+{$r-}	{$u-}	{$e+}	{$m+}
+{ $ e	err.log (not on Mac, for now)}
+{[j=10/40/80!,t=2,o=95]}
+{*-------------------------------------------------------------------------------*
+ |                                                                               |
+ |                   <<< General Useful Utility Routines >>>                     |
+ |                                                                               |
+ |                                 Ira L. Ruben                                  |
+ |                                   09/04/85                                    |
+ |                                                                               |
+ *-------------------------------------------------------------------------------*}
+
+UNIT Utilities;
+
+INTERFACE
+USES MemTypes;
+
+CONST
+	Null  = Chr(0);
+	Etx   = Chr(3);
+	Bell  = Chr(7);
+	Bs    = Chr(8);
+	Tab   = Chr(9);
+	FF    = Chr(12);
+	Cr    = Chr(13);
+	Dle   = Chr(16);
+	Esc   = Chr(27);
+	NullString = '';
+
+TYPE
+	nState = (nValid,   { valid number }
+				 nNull,    { no number -- nothing specified }
+				 nBad,     { invalid number }
+				 nOverFlow { overflow -- number too big }
+				);
+
+FUNCTION UpCh(Ch: Char): Char;
+	{Convert character to upper case.}
+
+FUNCTION LowCh(Ch: Char): Char;
+	{Convert character to lower case.}
+
+PROCEDURE UpStr(S: StringPtr);
+	{Convert a string to upper case.}
+
+PROCEDURE LowStr(S: StringPtr);
+	{Convert a string to lower case.}
+
+FUNCTION EqStr(S1, S2: StringPtr): Boolean;
+	{Compare two strings for equality (ignoring case).}
+
+FUNCTION EqStrCst(S1: StringPtr; S2: Str255): Boolean;
+	{Compare a string against a string constant (ignoring	case).}
+
+PROCEDURE TrimLeading(S: StringPtr);
+	{Trim leading blanks.}
+
+PROCEDURE TrimTrailing(S: StringPtr);
+	{Trim trailing blanks.}
+
+PROCEDURE TrimBlanks(S: StringPtr);
+	{Trim leading and trailing blanks.}
+
+PROCEDURE Koncat(S1, S2: StringPtr);
+	{Concatenate two strings.}
+
+PROCEDURE KoncatCst (S1: StringPtr; S2: Str255);
+	{Concatenate two strings.}
+
+PROCEDURE SetStr(Src, Dst: StringPtr);
+	{Copy	entire source	string to destination.}
+
+PROCEDURE CopyStr(Src, Dst: StringPtr; Start, Count: Integer);
+	{Copy substring of source, starting at Src[Start] to destination.}
+
+FUNCTION IntToStr(N: LongInt; Width: Integer; HexStr: Boolean): StringPtr;
+ { Converts the (long) integer N to a string. 
+	IF Width>0 and Width>length(string), then the number will be
+		right-justified in a string of width characters.
+	If Width<0 and Abs(Width)>length(string), then the number is again
+		right justified but padded with leading zeros instead	of blanks.
+	In this	case a negative number will have a minus as its first
+		character.
+	Caution, do not do two calls to this function in any one Concat! }
+
+FUNCTION StrToInt(NS:	StringPtr; VAR cState: nState):	LongInt;
+	{Convert a string	to an	integer. The cState	indicates	whether	the	conversion
+	 was successful.}
+	{Note: modified to do hex conversions. KJF 11-Jun-86}
+
+procedure ZeroMem (P: Ptr; NWords: integer);
+{ Zero Memory beginning at P (word aligned) and zeroing NWords words }
+
+procedure CopyChars (Src, Dest: Ptr; NBytes: integer);
+{ Copy bytes from Src to Dest }
+  
+PROCEDURE MacsBug; INLINE $A9FF;
+PROCEDURE MacsBugPrint(Str:Str255); INLINE $ABFF;
+
+IMPLEMENTATION {$p}
+
+VAR
+	StrResult:Str255;
+	(*
+	NullS:		Str255;
+	Hex:			PACKED ARRAY [0..15] OF	Char;
+	*)
+	{[j=0/0]}
+
+(*
+
+{*-------------------------------------------*
+ | InitUtil - Utility Manager Initialization |
+ *-------------------------------------------*}
+
+PROCEDURE	InitUtl;
+
+	BEGIN	{ called before any other displays by the	assembler so that
+				we may clear the screen prior to writing the into statement.}
+		Hex	:= '0123456789ABCDEF';
+		NullS	:= '';
+	END; {InitUtil}
+ *)
+
+{*-----------------------------------------*
+ |	UpCh - Convert character to	upper	case |
+ *-----------------------------------------*}
+
+FUNCTION UpCh(Ch:	Char): Char;
+	EXTERNAL;
+	(*
+	BEGIN	{UpCh}
+		UpCh :=	Ch;
+		IF ('a'	<= Ch) & (Ch <=	'z') THEN	UpCh :=	Chr(Ord(Ch)	-	32);
+	END; {UpCh}
+	*)
+
+{*------------------------------------------*
+ |	LowCh	-	Convert	character	to lower case	|
+ *------------------------------------------*}
+
+FUNCTION LowCh(Ch: Char):	Char;
+	EXTERNAL;
+	(*
+	BEGIN	{LowCh}
+		LowCh	:= Ch;
+		IF ('A'	<= Ch) & (Ch <=	'Z') THEN	LowCh	:= Chr(Ord(Ch) + 32);
+	END; {LowCh}
+	*)
+
+{*-----------------------------------------*
+ |	UpStr	-	Convert	a	string to	upper	case |
+ *-----------------------------------------*}
+
+PROCEDURE	UpStr(S: StringPtr);
+	EXTERNAL;
+	(*
+	VAR
+		i: Integer;
+
+	BEGIN	{UpStr}
+		i	:= Length(S^);
+		WHILE	i	>	0	DO
+			BEGIN
+			S^[i]	:= UpCh(S^[i]);
+			i	:= i - 1;
+			END;
+	END; {UpStr}
+	*)
+
+{*------------------------------------------*
+ |	LowStr - Convert a string	to lower case	|
+ *------------------------------------------*}
+
+PROCEDURE	LowStr(S:	StringPtr);
+	EXTERNAL;
+	(*
+	VAR
+		i: Integer;
+
+	BEGIN	{LowStr}
+		i	:= Length(S^);
+		WHILE	i	>	0	DO
+			BEGIN
+			S^[i]	:= LowCh(S^[i]);
+			i	:= i - 1;
+			END;
+	END; {LowStr}
+	*)
+
+{*----------------------------------------------------------*
+ | EqStr - Compare two strings for equality	(ignoring	case)	|
+ *----------------------------------------------------------*}
+
+FUNCTION EqStr(S1, S2: StringPtr): Boolean;
+	EXTERNAL;
+	(*
+	VAR
+		i: Integer;
+
+	BEGIN	{EqStr}
+		EqStr	:= True;
+		FOR	i	:= 0 TO	Length(S1^)	DO
+			IF UpCh(S1^[i])	<> UpCh(S2^[i])	THEN
+				BEGIN
+				EqStr	:= False;
+				Exit(EqStr);
+				END;
+	END; {EqStr}
+	*)
+
+{*-----------------------------------------------------------------------*
+ | EqStrCst	-	Compare	a	string against a string	constant (ignoring case) |
+ *-----------------------------------------------------------------------*}
+
+FUNCTION EqStrCst(S1:	StringPtr; S2: Str255):	Boolean;
+	EXTERNAL;
+	(*
+	BEGIN	{EqStrCst}
+		EqStrCst :=	EqStr(S1,	@S2);
+	END; {EqStrCst}
+	*)
+
+{*-----------------------------------*
+ | TrimLeading - Trim	leading	blanks |
+ *-----------------------------------*}
+
+PROCEDURE	TrimLeading(S: StringPtr);
+	EXTERNAL;
+	(*
+	VAR
+		i, Len:	Integer;
+
+	BEGIN	{TrimLeading}
+		i	:= 1;	Len	:= Length(S^);
+		WHILE	i	<= Len DO
+			BEGIN
+			IF (S^[i]	<> ' ')	&	(S^[i] <>	Tab) THEN
+				BEGIN
+				Delete(S^, 1,	i	-	1);
+				Exit(TrimLeading);
+				END;
+			i	:= i + 1;
+			END;
+
+		SetStr(@NullS, S);
+	END; {TrimLeading}
+	*)
+
+{*--------------------------------------*
+ | TrimTrailing	-	Trim trailing	blankls	|
+ *--------------------------------------*}
+
+PROCEDURE	TrimTrailing(S:	StringPtr);
+	EXTERNAL;
+	(*
+	VAR
+		i: Integer;
+
+	BEGIN	{TrimTrailing}
+		i	:= Length(S^);
+		WHILE	i	>	0	DO
+			IF (S^[i]	=	' ') | (S^[i]	=	Tab) THEN
+				i	:= i - 1
+			ELSE
+				Leave;
+		S^[0]	:= Chr(i);
+	END; {TrimTrailing}
+	*)
+
+{*-----------------------------------------------*
+ | TrimBlanks	-	Trim leading and trailing	blanks |
+ *-----------------------------------------------*}
+
+PROCEDURE	TrimBlanks(S:	StringPtr);
+	EXTERNAL;
+	(*
+	BEGIN	{TrimBlanks}
+		TrimLeading(S);
+		TrimTrailing(S);
+	END; {TrimBlanks}
+	*)
+
+{*----------------------------------*
+ | Koncat	-	Concatenate	two	strings	|
+ *----------------------------------*}
+
+PROCEDURE	Koncat(S1, S2: StringPtr);
+	EXTERNAL;
+	(*
+	VAR
+		NewLength: Integer;
+		S1Kludge,	S2Kludge:	StringPtr;
+
+	BEGIN	{Koncat}
+		NewLength	:= Length(S1^) + Length(S2^);
+		S1Kludge :=	StringPtr(Ord(S1)	+	1	+	Length(S1^));
+		S2Kludge :=	StringPtr(Ord(S2)	+	1);
+		MoveLeft(S2Kludge^,	S1Kludge^, Length(S2^));
+		S1^[0] :=	Chr(NewLength);
+	END; {Koncat}
+	*)
+
+PROCEDURE KoncatCst (S1: StringPtr; S2: Str255);
+	(* Same as Koncat, only allows constant to be passed. *)
+
+{*---------------------------------------------------*
+ | SetStr	-	Copy entire	source string	to destination |
+ *---------------------------------------------------*}
+
+PROCEDURE	SetStr(Src,	Dst: StringPtr);
+	EXTERNAL;
+	(*
+	BEGIN	{SetStr}
+		MoveLeft(Src^, Dst^, Ord(Src^[0])	+	1);
+	END; {SetStr}
+	*)
+
+{*-----------------------------------------------------------------*
+ | CopyStr - Copy	substring	of Src,	starting at	Src[Start] to	Dst. |
+ *-----------------------------------------------------------------*}
+
+PROCEDURE	CopyStr(Src, Dst:	StringPtr; Start,	Count: Integer);
+	EXTERNAL;
+	(*
+	VAR
+		SrcKludge, DstKludge:	StringPtr;
+
+	BEGIN	{CopyStr}
+		SrcKludge	:= StringPtr(Ord(Src)	+	Start);
+		DstKludge	:= StringPtr(Ord(Dst)	+	1);
+		MoveLeft(SrcKludge^, DstKludge^, Count);
+		Dst^[0]	:= Chr(Count);
+	END; {CopyStr}
+	*)
+
+{*-------------------------------------------------*
+ | IntToStr	-	Convert	a	(long) integer to	a	string |
+ *-------------------------------------------------*}
+
+FUNCTION IntToStr(N: LongInt;	Width: Integer;	HexStr:	Boolean):	StringPtr;
+	EXTERNAL;
+	(*
+	VAR
+		Neg: Boolean;
+		i, Len,	Padding, w,	StartFilling:	Integer;
+		Filler:	Char;
+		S: String[30];
+		X: RECORD
+				 CASE	Integer	OF
+					 0:
+						 (Nbr: LongInt);
+					 1:
+						 (N: PACKED	ARRAY	[0..7] OF	0..15);
+			 END;
+
+	BEGIN	{IntToStr}
+		Neg	:= False;
+		IF N = 0 THEN
+			S	:= '0'
+		ELSE IF	HexStr THEN
+			BEGIN	{convert to	hex}
+			X.Nbr	:= N;
+
+			FOR	i	:= 0 TO	7	DO
+				IF Odd(i)	THEN
+					S[i	+	1] :=	Hex[X.N[i	-	1]]
+				ELSE
+					S[i	+	1] :=	Hex[X.N[i	+	1]];
+
+			i	:= 1;	S[0] :=	Chr(8);
+			WHILE	i	<= 8 DO
+				BEGIN
+				IF S[i]	<> '0' THEN
+					BEGIN
+					Delete(S,	1, i - 1);
+					Leave;
+					END;
+				i	:= i + 1;
+				END;
+			END	{converting	to hex}
+		ELSE
+			BEGIN	{convert to	decimal}
+			S[0] :=	Chr(11);
+			i	:= 11;
+			Neg	:= (N	<	0);
+			N	:= Abs(N);
+
+			REPEAT
+				S[i] :=	Chr(Ord('0') + (N	MOD	10));
+				i	:= i - 1;
+				N	:= N DIV 10;
+			UNTIL	N	=	0;
+
+			IF Neg THEN
+				BEGIN
+				S[i] :=	'-';
+				i	:= i - 1;
+				END;
+
+			Delete(S,	1, i);
+			END; {converting to	decimal}
+
+		Len	:= Length(S);
+		w	:= Abs(Width);
+
+		StrResult	:= '';
+		IF Len < w THEN
+			BEGIN
+			Padding	:= w - Len;
+			StrResult[0] :=	Chr(Padding);
+			StartFilling :=	1;
+			IF Width > 0 THEN
+				Filler :=	' '
+			ELSE
+				BEGIN	{filler	is to	be leading zeros}
+				Filler :=	'0';
+				IF Neg THEN
+					BEGIN
+					StartFilling :=	2;
+					StrResult[1] :=	'-';
+					S[1] :=	'0';
+					END; {leading	zero setup}
+				END;
+			FOR	i	:= StartFilling	TO Padding DO	StrResult[i] :=	Filler;
+			END;
+
+		StrResult	:= Concat(StrResult, S);
+		IntToStr :=	@StrResult;
+	END; {IntToStr}
+	*)
+
+{*-------------------------------------------*
+ | StrToInt	-	Convert	a	string to	an integer |
+ *-------------------------------------------*}
+
+FUNCTION StrToInt(NS:	StringPtr; VAR cState: nState):	LongInt;
+	EXTERNAL;
+	(*
+	VAR
+		S: Str255;
+		i, Len:	Integer;
+		N: LongInt;
+		Neg: Boolean;
+		Ch:	Char;
+
+	BEGIN	{StrToInt}
+		CState :=	nValid;
+		SetStr(NS, @S);	{copy	their	string so	we don't mess it up}
+		TrimBlanks(@S);
+		N	:= 0;
+		Neg	:= False;
+
+		IF S = ''	THEN
+			CState :=	nNull
+		ELSE
+			BEGIN
+			Ch :=	S[1];
+			IF (Ch = '-')	|	(Ch	=	'+') THEN
+				BEGIN
+				Neg	:= (Ch = '-');
+				Delete(S,	1, 1);
+				IF S = ''	THEN CState	:= nBad;
+				END;
+			END;
+
+		Len	:= Length(S);
+		IF Len > 0 THEN
+			BEGIN
+			i	:= 1;
+			Ch :=	S[1];
+			REPEAT
+				IF (Ch < '0')	|	(Ch	>	'9') THEN
+					BEGIN
+					CState :=	nBad;
+					N	:= 0;
+					Leave;
+					END;
+
+				IF i > 10	THEN
+					BEGIN
+					CState :=	nOverFlow;
+					N	:= 0;
+					Leave;
+					END;
+
+				IF (i	=	10)	&	((N	>	214748364) | ((N = 214748364)	&	(Ch	>	'7'))) THEN
+					BEGIN
+					CState :=	nOverFlow;
+					N	:= 0;
+					Leave;
+					END;
+
+				N	:= (10 * N)	+	(Ord(Ch) - Ord('0'));
+
+				i	:= i + 1;
+				IF i > Len THEN	Leave;
+				Ch :=	S[i];
+			UNTIL	False;
+			END;
+
+		IF Neg THEN
+			StrToInt :=	-	N
+		ELSE
+			StrToInt :=	N;
+	END; {StrToInt}
+	*)
+
+procedure ZeroMem (P: Ptr; NWords: integer);
+{ Zero Memory beginning at P (word aligned) and zeroing NWords words }
+	EXTERNAL;
+	
+procedure CopyChars (Src, Dest: Ptr; NBytes: integer);
+{ Copy bytes from Src to Dest }
+	EXTERNAL;
+  
+END.

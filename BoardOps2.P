@@ -1,0 +1,1257 @@
+{BoardOps2			Implementation of BoardOps.p	
+
+DESCRIPTION
+			BoardOps -- Operations defined on points of the GO Board.
+				supports capture, handicap points, and breadth first search
+
+AUTHOR
+			Ken Friedenbach
+			Copyright 1986-1988
+			All Rights Reserved.
+}
+
+{dBoardSize dHoshiLine dBoxH/V dHor/dVerOffset}
+	{  9				3						20					4 }
+	{ 11				3						20					4 }
+	{ 13				4						20					4 }
+	{ 19				4						16					4 }
+
+{Note: dBoxH/dBoxV and dHorOffset/dVerOffset are maintained for possible}
+{use with screens/printers with non-square pixels.}
+
+function CallComputeHigh (pDoc: p2DocInfo; g: p2Graph; p: p2Node; pProc: ProcPtr): integer;
+{ call ComputeHigh functions through a ProcPtr }
+EXTERNAL; {in GOAsm.a}
+
+function CallComputeNew (pDoc: p2DocInfo; g: p2Graph; p: p2Node; pProc: ProcPtr): integer;
+{ call CallComputeNew functions through a ProcPtr }
+EXTERNAL; {in GOAsm.a}
+
+{$S BoardOps}
+{$IFC qTrace}{$D++}{$ENDC}
+procedure BoardOpsError (s: Str255);
+	begin
+		KoncatCst (@s, ', in BoardOps Unit.');
+		GOEngineError (s, 0, 0);
+	end; {GraphError}
+
+{$IFC qTrace}{$D+}{$ENDC}
+function CompPtType (pDoc: p2DocInfo; x, y: integer; var ln, ln2, sd, sd2: integer): integer;
+	var ptTyp: integer; xln, yln: integer;
+	begin
+		with pDoc^ do
+			if (x > dBoardSize) or (y > dBoardSize) then
+				begin
+					ptTyp := OffBoard;
+					ln  := OffBoard;
+					ln2 := OffBoard;
+					sd  := OffBoard;
+					sd2 := OffBoard;
+				end
+			else
+				begin
+						{ Compute lines and nearest sides }
+					if x >= dMidPt then xln := dBoardSize-x+1
+					else xln := x;
+					if y >= dMidPt then yln := dBoardSize-y+1
+					else yln := y;
+					if xln < yln then
+						begin
+							ln := xln;
+							ln2 := yln;
+							if x=xln then sd := LftEdge
+							else sd := RhtEdge;
+							if y = yln then sd2 := BotEdge
+							else sd2 := TopEdge;
+						end
+					else
+						begin
+							ln := yln;
+							ln2 := xln;
+							if y = yln then sd := BotEdge
+							else sd := TopEdge;
+							if x = xln then sd2 := LftEdge
+							else sd2 := RhtEdge;
+						end;
+						{ Compute dBoard Type }
+					ptTyp := Center;
+					if x = 1 then {left side}
+						begin
+							ptTyp := LftEdge;
+							if y = 1 then 
+								ptTyp := BtLfCorner;
+							if y = dBoardSize then 
+								ptTyp := TpLfCorner;
+						end
+					else if x = dBoardSize then {right side}
+						begin
+							ptTyp := RhtEdge;
+							if y = 1 then
+								ptTyp := BtRtCorner;
+							if y = dBoardSize then
+								ptTyp := TpRtCorner;
+						end
+					else if y = 1 then
+						ptTyp := BotEdge
+					else if y = dBoardSize then
+						ptTyp := TopEdge
+					else if (x = dHoshiLine) or (x = (dBoardSize - dHoshiLine + 1)) then
+						begin
+							if (y = dHoshiLine) or (y = (dBoardSize - dHoshiLine + 1)) then
+								ptTyp := Hoshi { min. 4 hoshi points }
+							else if dNumHoshi = 9 then
+								if y = dMidPt then
+									ptTyp := Hoshi { center of Left, Right edges }
+						end
+					else if y = dMidPt then
+						begin
+							if x = dMidPt then 
+								if dNumHoshi >= 5 then 
+									ptTyp := Hoshi; { center of dBoard }
+						end
+					else if (y = dHoshiLine) or (y = (dBoardSize - dHoshiLine + 1)) then
+						begin
+							if x = dMidPt then 
+								if dNumHoshi = 9 then 
+									ptTyp := Hoshi; { center of Top, Bottom edges }
+						end;
+				end;
+			CompPtType := ptTyp;
+	end; {CompPtType}
+	
+function CompPtState (pDoc: p2DocInfo; p: p2GOPoint): integer;
+	var BlackAdj, WhiteAdj: integer;
+	
+	procedure CountAdjStones (pDoc: p2DocInfo; p2: p2GOPoint);
+		{ see note below }
+		begin
+			case p2^.OccStatus of
+					UnOcc: ;
+					BlackOcc: BlackAdj := BlackAdj + 1;
+					WhiteOcc: WhiteAdj := WhiteAdj + 1;
+			end; {cases}
+		end; {CountAdjStones}
+		
+	var PtS: PointHighState;
+	
+	begin {CompPtState}
+		{ This function uses OccStatus, not PtOcc, to compute a new PtOcc.
+			So it does not need to worry about the "UndefinedState" problem,
+			except at adjacent points. }
+		PtS.PtStateInt := 0;
+		with pDoc^, p^ do
+			begin
+				PtS.PtOcc := OccStatus;
+				case OccStatus of
+					BlackOcc: ;
+					WhiteOcc: ;
+					UnOcc: 
+						begin
+							WhiteAdj := 0; BlackAdj := 0; 
+							EachAdjPoint (pDoc, p, CountAdjStones);
+							if (WhiteAdj+BlackAdj) > 0 then 
+								begin { Level 1 refinement }
+									PtS.PtOcc := LibertyOcc;
+									PtS.Lin1 := Line;
+									PtS.Lin2 := Line2;
+									case BlackAdj of
+										0:	case WhiteAdj of
+													0: PtS.BlAdjWhAdj := B0W0;
+													1: PtS.BlAdjWhAdj := B0W1;
+													2: PtS.BlAdjWhAdj := B0W2;
+													3: PtS.BlAdjWhAdj := B0W3;
+													4: PtS.BlAdjWhAdj := B0W4;
+												end; {case WhiteAdj}
+										1:	case WhiteAdj of
+													0: PtS.BlAdjWhAdj := B1W0;
+													1: PtS.BlAdjWhAdj := B1W1;
+													2: PtS.BlAdjWhAdj := B1W2;
+													3: PtS.BlAdjWhAdj := B1W3;
+												end; {case WhiteAdj}
+										2:	case WhiteAdj of
+													0: PtS.BlAdjWhAdj := B2W0;
+													1: PtS.BlAdjWhAdj := B2W1;
+													2: PtS.BlAdjWhAdj := B2W2;
+												end; {case WhiteAdj}
+										3:	case WhiteAdj of
+													0: PtS.BlAdjWhAdj := B3W0;
+													1: PtS.BlAdjWhAdj := B3W1;
+												end; {case WhiteAdj}
+										4:	{case WhiteAdj of
+													0: } PtS.BlAdjWhAdj := B4W0;
+												{end;} {case WhiteAdj}
+									end; {case BlackAdj}
+								end
+							else { Level 0 definitions }
+								begin
+									PtS.Lin1 := Line;
+									if Line = Line2 then
+										PtS.Lin2 := Line2 { Keep the Diagonals separate for this level }
+									else if Line2 <= dHoshiLine then
+										PtS.Lin2 := CornerLine { Gather corner points off the diagonal by Line }
+									else if dNumHoshi > 5 then { large boards, 19x19. xxx later? 17x17? 15x15? }
+										if Line2 >= dMidPt-1 then
+											PtS.Lin2 := EdgeLine
+										else
+											PtS.Lin2 := MidLine
+									else { small boards, 9x9, 11x11, and 13x13 }
+										PtS.Lin2 := EdgeLine;
+								end;
+						end; 
+				end; {cases OccStatus}
+			end; {with}
+		CompPtState := PtS.PtStateInt;
+	end; {CompPtState}
+	
+function NumLiberties (p: p2Node {GOString}): integer;
+	var nLib: integer;
+	
+	procedure ChkLib (p2: p2Node);
+		var s: PointHighState;
+		begin
+			s.PtStateInt := p2^.LowState;
+			if s.PtOcc >= UnOcc then
+				nLib := nLib+1;
+		end; {ChkLib}
+
+	begin {NumLiberties}
+		nLib := 0;
+		EachAdjNode (p, ChkLib);
+		NumLiberties := nLib;
+	end; {NumLiberties}
+
+procedure CountPrisoners (pDoc: p2DocInfo;
+								  var WhiteCapturedByBlack: integer;
+								  var BlackCapturedByWhite: integer);
+{ examine dGameRecord from 1 to dNextMove-1. }
+{ count stones that have been captured. }
+	var i, B, W: integer;
+	begin
+		B := 0; W := 0;
+		with pDoc^ do
+			for i := 1 to dNextMove-1 do
+				with dGameRecord [i] do
+					if MovePoint <> nil then { not a Pass }
+						if CapturedBy <> 0 then
+							if MoveColor = BlackOcc then
+								B := B + 1
+							else { MoveColor = WhiteOcc } 
+								W := W + 1;
+		WhiteCapturedByBlack := W;
+		BlackCapturedByWhite := B;
+	end; {CountPrisoners}
+
+{$IFC qTrace}{$D++}{$ENDC}
+procedure InitDocInfo (var Doc: TDocInfo; siz: integer; hnd: integer; 
+			InitStrNode: p2Node; forReplay: Boolean);
+	var x, y: integer; r: rect; ln, ln2, sd, sd2: integer; secs: longint; 
+		lev: TGraphLevel; corn: integer;
+	begin
+		{$IFC TraceInit}
+		DebugStr ('Entering InitDocInfo.');
+		{$ENDC}
+		with Doc do
+			begin 
+					{Set up Default values}
+					
+				dReadyForGraphics := false;
+				dWantGraphics := false;
+				
+			{$IFC TraceRequest} 
+				gTraceRequest := false;
+			{$ENDC}
+		
+				if not forReplay then
+					begin
+						dFormat := 1; { should be 1 }
+					
+						GetDateTime (secs);
+						IUDateString (secs, longDate, dDate);
+						
+						dPlace := '';
+						
+						dType := DocGame;
+						
+						dTitle := '';
+						
+						dBlackPlayer := '';
+						
+						dWhitePlayer := '';
+					end;
+			
+					{ assumes game, not problem or joseki }
+				dNumHandicap := hnd;
+				if dNumHandicap = 0 then
+					begin
+						dGameTerms := EvenGame;
+						dBlackToPlay := true;	
+					end
+				else
+					begin
+						dGameTerms := StonesHandicap;
+						dBlackToPlay := false;	
+					end;
+					
+				dNextStone := 1;
+				dFirstNumber := 1;
+				dNextMove := 1; { may be bumped by MakeHandicap }
+
+				if not forReplay then
+					begin
+						dNumKomi := 0;		{ not supported, yet }
+						dGameRules := JapaneseRules;
+					end;
+
+				if not forReplay then
+					begin
+							{ assume big dBoard: }
+							{ Variables controlling dBoard Drawing, sizes in screen pixels }
+						dBoxH := 20;
+						dBoxV := 20;
+						dHorOffset := 4;
+						dVerOffset := 4;
+		
+						dBoardSize := siz;	
+						dMidPt := (dBoardSize+1) div 2;	
+		
+						case dBoardSize of
+							 9:
+								begin
+									dHoshiLine := 3;
+									dNumHoshi := 4;
+								end;
+							11:
+								begin
+									dHoshiLine := 3;
+									dNumHoshi := 4;
+								end;
+							13:
+								begin
+									dHoshiLine := 4;
+									dNumHoshi := 5;
+								end;
+							19:
+								begin
+									dHoshiLine := 4;
+									dNumHoshi := 9;
+									if SmallScreen then
+										begin
+											dBoxH := 16;
+											dBoxV := 16;
+										end;
+								end;
+							otherwise
+								BoardOpsError('Bad dBoard size.');
+						end; {cases}
+		
+						dLabelBoard := false;				
+						dNumberStones := true;
+
+						if dLabelBoard then
+							begin
+								dHorOffset := dBoxH + 4;
+								dVerOffset := dBoxV + 4;
+							end;
+											
+								{ just to give some known state: }
+						with dGameRecord [0] do
+							begin
+								MovePoint := nil; 
+								MoveColor := UnOcc;
+								KoPoint := nil;
+								FirstCapture := 0;
+								CapturedBy := 0;
+								nextCapture := 0;
+							end;
+						
+					end; {if not forReplay}
+							
+				dMachinePlaying := false;
+
+						{ give the dBoard some features }
+				for x := 1 to dBoardSize do
+					for y := 1 to dBoardSize do
+						with dBoard[x][y] do
+							begin
+								PtNode := InitStrNode;
+								NextPtSameString := nil;
+								PtStrType.PtStateInt := 0;
+								PtMarked := false;
+								AnalysisResult := nil;
+								AnalysisInvalidated := nil;
+								for lev := PointsGraphLevel to AreasGraphLevel do
+									RequestCheck [lev] := false;
+								StoneMark := 0;
+								OccStatus := UnOcc;
+								PtType := CompPtType (@Doc, x, y, ln, ln2, sd, sd2);
+								XCoord := x;
+								YCoord := y;
+								Line  := ln;
+								Line2 := ln2;
+								NearestSide  := sd;
+								NextNearSide := sd2;
+								MoveIndex := 0;
+								AddElement (InitStrNode, @dBoard [x][y]);
+							end;
+
+				dUpdateLevel := PointsGraphLevel; 
+						{ xxx also set in InitGOAbstHier ?? }
+						{ There are some interdependencies between InitGOAbstHier }
+						{ and InitDocInfo which might be cleaned up. }
+				dCurJoseki := nil;
+				dDisplayJoseki := HideJoseki;
+				for corn := TpRtCorner to BtRtCorner do
+					begin
+						with dNormalJoseki [corn] do
+							begin
+								JosekiTree := nil;
+								prevJosekiTree := nil;
+								FirstMove := UnOcc;
+								JosekiState := AtBegin;
+							end;
+						with dReflectJoseki [corn] do
+							begin
+								JosekiTree := nil;
+								prevJosekiTree := nil;
+								FirstMove := UnOcc;
+								JosekiState := AtBegin;
+							end;
+					end;
+				
+				dKoPoint := nil; { unless a problem, etc. }
+				dAnalysisPoints := nil;
+				dCapStone := nil;	
+			
+			end;
+		{$IFC TraceInit}
+		DebugStr ('Leaving InitDocInfo.');
+		{$ENDC}
+	end; {InitDocInfo}
+
+{$IFC qTrace}{$D++}{$ENDC}
+procedure SetUpHandicap (pDoc: p2DocInfo; n: integer; 
+				procedure ReportHandicap (pDoc: p2DocInfo; p: p2GOPoint; doAdjChk: Boolean));
+
+	procedure MakeHandicap (x, y: integer);
+	{ NOTE: assumes x, y are not 0,0 (pass) }
+		var chgPt: p2GOPoint;
+		begin
+			{$IFC TraceInit}
+			DebugStr ('Entering MakeHandicap.');
+			{$ENDC}
+			with pDoc^ do
+				begin
+					chgPt := @dBoard [x] [y];
+					with chgPt^ do
+						begin
+							{ StoneMark stays 0 }
+							MoveIndex := dNextMove;
+							OccStatus := BlackOcc;
+						end;
+					with dGameRecord [dNextMove] do
+						begin
+							MovePoint := @dBoard [x] [y];
+							MoveColor := BlackOcc;
+							KoPoint := nil;
+							FirstCapture := 0;
+							CapturedBy := 0;
+							nextCapture := 0;
+						end;
+					dNextMove := dNextMove + 1;
+					dFirstNumber := dFirstNumber + 1; { don't number Handicaps }
+					ReportHandicap (pDoc, chgPt, true {check for Adjacent Changes});
+				end;
+			{$IFC TraceInit}
+			DebugStr ('Leaving MakeHandicap.');
+			{$ENDC}
+		end; {MakeHandicap}
+		
+	var upHy, rtHx, lwHy, lfHx, midH, i: integer;
+	
+	begin {SetUpHandicap}
+		{$IFC TraceInit}
+		DebugStr ('Entering SetUpHandicap.');
+		{$ENDC}
+		with pDoc^ do
+			begin
+				if n < 2 then n := 0
+				else dBlackToPlay := false;
+				if n > dNumHoshi then dNumHandicap := dNumHoshi
+				else dNumHandicap := n;
+				upHy  := dBoardSize - dHoshiLine + 1;
+				rtHx  := dBoardSize - dHoshiLine + 1;
+				lwHy  := dHoshiLine;
+				lfHx  := dHoshiLine;
+				midH  := (dBoardSize + 1) div 2;
+				i := 1;
+				while i <= dNumHandicap do
+					begin
+						dNextStone := 1; { xxx is this needed?  }
+						{ Note: assumes human is giving handicap to computer, }
+						{ i.e. the upper left corner should be fourth stone }
+						{ Note: Handicap points have OccStatus = BlackOcc }
+						{ and StoneMark = 0 }
+						if i <= 4 then
+							case i of
+								1: MakeHandicap (rtHx, upHy);
+								2: MakeHandicap (lfHx, lwHy);
+								3: MakeHandicap (rtHx, lwHy);
+								4: MakeHandicap (lfHx, upHy);
+							end {cases}
+						else if odd(dNumHandicap) then
+							case i of
+								5: MakeHandicap (dMidPt, dMidPt);
+								6: MakeHandicap (rtHx, dMidPt); 
+								7: MakeHandicap (lfHx, dMidPt);
+								8: MakeHandicap (dMidPt, lwHy);
+								9: MakeHandicap (dMidPt, upHy);
+							end {cases}
+						else
+							case i of
+								5: MakeHandicap (rtHx, dMidPt);
+								6: MakeHandicap (lfHx, dMidPt);
+								7: MakeHandicap (dMidPt, lwHy);
+								8: MakeHandicap (dMidPt, upHy);
+							end; {cases}
+							i := i + 1;
+					end;
+			end;
+		{$IFC TraceInit}
+		DebugStr ('Leaving SetUpHandicap.');
+		{$ENDC}
+	end; {SetUpHandicap}
+
+procedure StartJosekiManagers (pDoc: p2DocInfo; aJosekiTree: p2JosekiTreeNode);
+	var corn: integer;
+	begin
+		with pDoc^ do
+			for corn := TpRtCorner to BtRtCorner do
+				begin
+					with dNormalJoseki [corn] do
+						begin
+							JosekiTree := aJosekiTree;
+							FirstMove := UnOcc;
+							JosekiState := AtBegin;
+						end;
+					with dReflectJoseki [corn] do
+						begin
+							JosekiTree := aJosekiTree;
+							FirstMove := UnOcc;
+							JosekiState := AtBegin;
+						end;
+				end;
+	end; {StartJosekiManagers}
+
+{$S Main }	
+{$IFC qTrace}{$D+}{$ENDC}
+function MakeMove (pDoc: p2DocInfo; atPt: p2GOPoint) :integer;
+	{ if atPt = nil, its a pass }
+	{ else atPt is an unoccupied point. }
+	{ returns: }
+	{ 0 if point was a legal move. }
+	{ 3 if point is illegal suicide move. }
+	{ 4 if point is illegal Ko move. }
+	{ Sets global variables if 0 is returned: }
+	{ dCapStone = nil if move does not capture anything, <> nil otherwise }
+	{  dCapStone is p2GOPoint, i.e. one of the stones captured. }
+	{ dKoPoint = nil, not a Ko capture, otherwise, point which was captured. }
+	{ dBlackToPlay is toggled. }
+	{ Move is recorded in BoardRecord. }
+	var nextKoPoint: p2GOPoint;
+			{ counts of immediately adjacent stones of various types: }
+		nVacant, nFriendly, nEnemy, 
+		nCapture: { lower bound on number of stones captured by this move. }
+			integer;
+	
+	procedure ChkBlkAdjs (pDoc: p2DocInfo; p2: p2GOPoint);
+	{ Black is going to play, check adjacencies }
+		begin
+			with pDoc^, p2^ do
+				case OccStatus of
+					UnOcc: nVacant := nVacant + 1; 
+					BlackOcc: nFriendly := nFriendly + 1;
+					WhiteOcc: 
+						begin
+							nEnemy := nEnemy + 1;
+							if NumLiberties (PtNode) = 1 then
+								begin
+									if dCapStone = nil then
+										begin
+											dCapStone := p2;
+											nCapture := 1;
+										end
+									else 
+										nCapture := nCapture + 1;
+								end;
+						end;
+				end; {cases}
+		end; {ChkBlkAdjs}
+
+	procedure ChkWhtAdjs (pDoc: p2DocInfo; p2: p2GOPoint);
+	{ White is going to play, check adjacencies }
+		begin
+			with pDoc^, p2^ do
+				case OccStatus of
+					UnOcc: nVacant := nVacant + 1; 
+					BlackOcc:
+						begin
+							nEnemy := nEnemy + 1;
+							if NumLiberties (PtNode) = 1 then
+								begin
+									if dCapStone = nil then
+										begin
+											dCapStone := p2;
+											nCapture := 1;
+										end
+									else 
+										nCapture := nCapture + 1;
+								end;
+						end;
+					WhiteOcc: nFriendly := nFriendly + 1;
+				end; {cases}
+		end; {ChkWhtAdjs}
+		
+	procedure ChkBlkLibs (pDoc: p2DocInfo; p2: p2GOPoint);
+		begin
+			with p2^ do
+				if OccStatus = BlackOcc then
+					if NumLiberties (PtNode) > 1 then
+						nVacant := nVacant + 1; { at least!}
+		end; {ChkBlkLibs}
+
+	procedure ChkWhtLibs (pDoc: p2DocInfo; p2: p2GOPoint);
+		begin
+			with p2^ do
+				if OccStatus = WhiteOcc then
+					if NumLiberties (PtNode) > 1 then
+						nVacant := nVacant + 1; { at least!}
+		end; {ChkWhtLibs}
+
+	begin {MakeMove}
+		with pDoc^ do
+			begin
+				if (atPt <> nil) and (atPt = dKoPoint) then
+					begin
+						MakeMove := 4; {illegal Ko}
+						Exit (MakeMove);
+					end;
+				nextKoPoint := nil; dCapStone := nil;
+				if atPt = nil then 
+					begin { pass, record it }
+						dBlackToPlay := not dBlackToPlay;
+						dNextStone := dNextStone+1;
+						with dGameRecord [dNextMove] do
+							begin
+								MovePoint := nil; { pass }
+								MoveColor := UnOcc;
+								KoPoint := nil;
+								FirstCapture := 0;
+								CapturedBy := 0;
+								nextCapture := 0;
+							end;
+						dNextMove := dNextMove+1;
+					end
+				else with atPt^ do
+					begin
+						if PtStrType.PtOcc = LibertyOcc then { only check if occupying Liberty }
+							begin
+								nVacant:=0; nFriendly:=0; nEnemy:=0; 
+								nCapture:=0;
+								if dBlackToPlay then
+									EachAdjPoint (pDoc, atPt, ChkBlkAdjs)
+								else
+									EachAdjPoint (pDoc, atPt, ChkWhtAdjs);
+								if nVacant = 0 then { potential Ko or Suicide }
+									begin
+										if (nCapture = 1) and (nFriendly = 0) then
+											begin
+												if NumElements (dCapStone^.PtNode) = 1 then
+													nextKoPoint := dCapStone;
+														{ can't immediately reoccupy }
+											end
+										else if nCapture = 0 then
+											{xx if playing Japanese rules ??}
+											begin
+												if dBlackToPlay then
+													EachAdjPoint (pDoc, atPt, ChkBlkLibs)
+												else
+													EachAdjPoint (pDoc, atPt, ChkWhtLibs);
+												if nVacant = 0 then
+													begin
+														MakeMove := 3; {suicide}
+														exit (MakeMove);
+													end;
+											end;
+									end; { nVacant = 0, potential Ko or Suicide }
+							end; {if PtStrType.PtOcc = LibertyOcc }
+						{ O.K. move, record it }
+						if dBlackToPlay then
+							begin
+								OccStatus := BlackOcc;
+								dBlackToPlay := false;
+							end
+						else
+							begin
+								OccStatus := WhiteOcc;
+								dBlackToPlay := true;
+							end;
+						StoneMark := dNextStone;
+						dNextStone := dNextStone+1;
+						MoveIndex := dNextMove;
+						dNextMove := dNextMove+1;
+						with dGameRecord [MoveIndex] do
+							begin
+								MovePoint := atPt;
+								MoveColor := OccStatus;
+								KoPoint := nextKoPoint;
+								FirstCapture := 0;
+								CapturedBy := 0;
+								nextCapture := 0;
+							end;
+					end; {else with atPt^}
+				dKoPoint := nextKoPoint;
+			end; {with pDoc^}
+		MakeMove := 0;
+	end; {MakeMove}
+
+{$IFC qTrace}{$D+}{$ENDC}
+procedure Capture (pDoc: p2DocInfo; 
+		procedure NotifyOfCapture (pDoc: p2DocInfo; p: p2GOPoint; doAdjChk: Boolean));
+	{ Capture assumes that last move in dGameRecord is the point }
+	{ Question: how to "draw"? i.e. call InvalRect? }
+	{ Answer (for now): pass in a "notify" procedure. }
+	var movPt: p2GOPoint; movClr: TOccStatus;
+	
+	procedure CaptureMove (p3: p2Node {p2GOPoint});
+		var mvIdx: integer; pt: p2GOPoint;
+		begin
+			with pDoc^ do
+				begin
+					pt := p2GOPoint (p3); {later: just coerce?}
+					with pt^ do
+						begin
+							mvIdx := MoveIndex;
+							StoneMark := 0; {just to be tidy}
+							OccStatus := UnOcc;
+							MoveIndex := 0;
+						end;
+					with dGameRecord [mvIdx] do
+						begin
+							CapturedBy := dNextMove-1;
+							nextCapture := dGameRecord [dNextMove-1].FirstCapture
+						end;
+					dGameRecord [dNextMove-1].FirstCapture := mvIdx;
+					NotifyOfCapture (pDoc, pt, false {do Adjacent check later});
+				end;
+		end; {CaptureMove}
+	
+	procedure chkWhtCaptures (pDoc: p2DocInfo; p2: p2GOPoint);
+	{ Black to move, check for White Captures }
+		begin
+			with p2^ do
+				if OccStatus = WhiteOcc then
+					if NumLiberties (PtNode) = 0 then
+						EachElement (PtNode, CaptureMove);
+		end; {chkWhtCaptures}
+		
+	procedure chkBlkCaptures (pDoc: p2DocInfo; p2: p2GOPoint);
+	{ White to move, check for Black Captures }
+		begin
+			with p2^ do
+				if OccStatus = BlackOcc then
+					if NumLiberties (PtNode) = 0 then
+						EachElement (PtNode, CaptureMove);
+		end; {chkBlkCaptures}
+		
+	begin {Capture}
+		with pDoc^ do
+			begin
+				with dGameRecord [dNextMove-1] do
+					begin
+						movPt  := MovePoint;
+						movClr := MoveColor
+					end;
+				if movClr = BlackOcc then
+					EachAdjPoint (pDoc, movPt, chkWhtCaptures)
+				else
+					EachAdjPoint (pDoc, movPt, chkBlkCaptures);
+			end;
+	end; {Capture}
+	
+{$IFC qTrace}{$D+}{$ENDC}
+procedure EachAdjPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+	var x, y: integer;
+	
+	begin
+		if p <> nil then { no points adjacent to a pass }
+			with pDoc^ do
+				begin
+					with p^ do
+						begin
+							x := XCoord;
+							y := YCoord;
+						end;
+					if x > 1 then
+						Visit (pDoc, @dBoard [x-1, y]);
+					if x < dBoardSize then
+						Visit (pDoc, @dBoard [x+1, y]);
+					if y > 1 then
+						Visit (pDoc, @dBoard [x, y-1]);
+					if y < dBoardSize then
+						Visit (pDoc, @dBoard [x, y+1]);
+				end;
+	end; {EachAdjPoint}
+
+procedure EachDiagPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+	var x, y: integer;
+	
+	begin
+		if p <> nil then { no points adjacent to a pass }
+			with pDoc^ do
+				begin
+					with p^ do
+						begin
+							x := XCoord;
+							y := YCoord;
+						end;
+					if x > 1 then
+						begin
+							if y > 1 then
+								Visit (pDoc, @dBoard [x-1, y-1]);
+							if y < dBoardSize then
+								Visit (pDoc, @dBoard [x-1, y+1]);
+						end;
+					if x < dBoardSize then
+						begin
+							if y > 1 then
+								Visit (pDoc, @dBoard [x+1, y-1]);
+							if y < dBoardSize then
+								Visit (pDoc, @dBoard [x+1, y+1]);
+						end;
+				end;
+	end; {EachDiagPoint}
+
+procedure EachSkipOnePoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+	var x, y: integer;
+	
+	begin
+		if p <> nil then { no points adjacent to a pass }
+			with pDoc^ do
+				begin
+					with p^ do
+						begin
+							x := XCoord;
+							y := YCoord;
+						end;
+					if x > 2 then
+						Visit (pDoc, @dBoard [x-2, y]);
+					if x < dBoardSize-1 then
+						Visit (pDoc, @dBoard [x+2, y]);
+					if y > 2 then
+						Visit (pDoc, @dBoard [x, y-2]);
+					if y < dBoardSize-1 then
+						Visit (pDoc, @dBoard [x, y+2]);
+				end;
+	end; {EachSkipOnePoint}
+
+procedure EachKnghtPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+	var x, y: integer;
+	
+	begin
+		if p <> nil then { no points adjacent to a pass }
+			with pDoc^ do
+				begin
+					with p^ do
+						begin
+							x := XCoord;
+							y := YCoord;
+						end;
+					if x > 1 then
+						begin
+							if y > 2 then
+								Visit (pDoc, @dBoard [x-1, y-2]);
+							if y < dBoardSize-1 then
+								Visit (pDoc, @dBoard [x-1, y+2]);
+							if x > 2 then
+								begin
+									if y > 1 then
+										Visit (pDoc, @dBoard [x-2, y-1]);
+									if y < dBoardSize then
+										Visit (pDoc, @dBoard [x-2, y+1]);
+								end;
+						end;
+					if x < dBoardSize then
+						begin
+							if y > 2 then
+								Visit (pDoc, @dBoard [x+1, y-2]);
+							if y < dBoardSize-1 then
+								Visit (pDoc, @dBoard [x+1, y+2]);
+							if x < dBoardSize -1 then
+								begin
+									if y > 1 then
+										Visit (pDoc, @dBoard [x+2, y-1]);
+									if y < dBoardSize then
+										Visit (pDoc, @dBoard [x+2, y+1]);
+								end;
+						end;
+				end;
+	end; {EachKnghtPoint}
+
+procedure EachSkipTwoPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+	var x, y: integer;
+	
+	begin
+		if p <> nil then { no points adjacent to a pass }
+			with pDoc^ do
+				begin
+					with p^ do
+						begin
+							x := XCoord;
+							y := YCoord;
+						end;
+					if x > 3 then
+						Visit (pDoc, @dBoard [x-3, y]);
+					if x < dBoardSize-2 then
+						Visit (pDoc, @dBoard [x+3, y]);
+					if y > 3 then
+						Visit (pDoc, @dBoard [x, y-3]);
+					if y < dBoardSize-2 then
+						Visit (pDoc, @dBoard [x, y+3]);
+				end;
+	end; {EachSkipTwoPoint}
+
+procedure EachLongKnghtPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+	var x, y: integer;
+	
+	begin
+		if p <> nil then { no points adjacent to a pass }
+			with pDoc^ do
+				begin
+					with p^ do
+						begin
+							x := XCoord;
+							y := YCoord;
+						end;
+					if x > 1 then
+						begin
+							if y > 3 then
+								Visit (pDoc, @dBoard [x-1, y-3]);
+							if y < dBoardSize-2 then
+								Visit (pDoc, @dBoard [x-1, y+3]);
+							if x > 3 then
+								begin
+									if y > 1 then
+										Visit (pDoc, @dBoard [x-3, y-1]);
+									if y < dBoardSize then
+										Visit (pDoc, @dBoard [x-3, y+1]);
+								end;
+						end;
+					if x < dBoardSize then
+						begin
+							if y > 3 then
+								Visit (pDoc, @dBoard [x+1, y-3]);
+							if y < dBoardSize-2 then
+								Visit (pDoc, @dBoard [x+1, y+3]);
+							if x < dBoardSize -2 then
+								begin
+									if y > 1 then
+										Visit (pDoc, @dBoard [x+3, y-1]);
+									if y < dBoardSize then
+										Visit (pDoc, @dBoard [x+3, y+1]);
+								end;
+						end;
+				end;
+	end; {EachLongKnghtPoint}
+
+
+procedure BreadFirstSearch (pDoc: p2DocInfo; g: p2Graph; startNod: p2Node; 
+		function IsTarget (n: p2Node; var Continue: Boolean): Boolean;
+			{ n is a node to Test for inclusion in BFS. }
+			{ returns true if n is to be Stacked, false otherwise. }
+			{ sets Continue to false, if search should stop. }
+		var BFSStack: p2ListItem);
+{ does breadth first search on a graph, starting from startNode. }
+{ stacks the nodes for future use in order encountered, including startNode. }
+{ IsTarget is a parametric function used to distinguish target nodes. }
+{ Assumes the Marked fields of Nodes are initially cleared. }
+{ Marks elements as stacked, and clears marks at end of search. }
+	
+	var BFSEnd: p2ListItem; Continue: Boolean; 
+	
+	procedure PushAndMark (n2: p2Node);
+		{ put a node on the user's stack, and mark it }
+		{ stack is "pushed" in reverse order, i.e. at end. }
+		var temp: p2ListItem;
+		begin
+			if g^.AvailListItems = nil then
+				MoreListItems (g);
+			temp := g^.AvailListItems;
+			g^.AvailListItems := temp^.NextListItem;
+			with temp^ do
+				begin
+					ListItem := n2;
+					NextListItem := nil;
+				end;
+			if BFSEnd = nil then BFSStack := temp
+			else BFSEnd^.NextListItem := temp;
+			BFSEnd := temp;
+			n2^.Marked := true;
+		end; {PushAndMark}
+	
+	procedure BFS1Pt (pDoc: p2DocInfo; p2: p2GOPoint);
+		begin
+			if Continue then
+				if not p2^.PtMarked then
+					if IsTarget (p2Node(p2), Continue) then
+						PushAndMark (p2Node (p2));
+		end; {BFS1Pt}
+		
+	procedure BFS1Gph (p2: p2Node);
+		begin
+			if Continue then
+				if not p2^.Marked then
+					if IsTarget (p2, Continue) then
+						PushAndMark (p2);
+		end; {BFS1Pt}
+		
+	var BFSAt, p: p2ListItem;
+	
+	begin {BreadFirstSearch}
+	
+			{ assume all marks are cleared. }
+		BFSStack := nil;
+		BFSEnd := nil;
+		BFSAt := nil;
+		PushAndMark (startNod);
+		Continue := true;
+		repeat
+			if BFSAt = nil then {first time}
+				BFSAt := BFSStack
+			else 
+				begin
+					BFSAt := BFSAt^.NextListItem;
+					if BFSAt = nil then Continue := false;
+				end;
+			if Continue then
+				if g^.GraphLevel = PointsGraphLevel then
+					EachAdjPoint (pDoc, p2GOPoint(BFSAt^.ListItem), BFS1Pt)
+				else
+					EachAdjNode (BFSAt^.ListItem, BFS1Gph);
+		until not Continue;
+			{ Unmark the nodes }
+		p := BFSStack;
+		while p <> nil do
+			begin
+				p^.ListItem^.Marked := false;
+				p := p^.NextListItem;
+			end;
+			{ Note to clients: return the list storage, when done. }
+	end; {BreadFirstSearch}
+	
+{$S ARes}	
+procedure RequestChange (g: p2Graph; pt: p2GOPoint);
+{ Request that a check for a change in state be recorded for this object. }
+{ The request is "recorded" at the point level, since they are persistent. }
+{ The representative is "marked" so multiple requests are not made, }
+{ even if the object changes. }
+	begin
+		if gTraceRequest then
+			begin
+				write ('Entering RequestChange: ');
+				WriteLev (g^.GraphLevel);
+			end;
+		with g^ do
+			begin
+				with pt^ do
+					begin
+						if not RequestCheck [GraphLevel] then
+							begin 
+								RequestCheck [GraphLevel] := true;
+								if gTraceRequest then
+									write (' at ');
+								Push (g, ChangeList, p2Node (pt));
+							end
+						else
+							begin
+								if gTraceRequest then
+									write (' (dup) ');
+							end;
+						if gTraceRequest then
+							WritePoint (XCoord, YCoord);
+					end;
+			end; {with g^}
+			if gTraceRequest then
+				writeln;
+		end; {RequestChange}
+
+	
+function NumCaptures (pDoc: p2DocInfo; move: integer): integer;
+	var 
+		n: integer;
+		cap: integer;
+	begin
+		n := 0;
+		with pDoc^ do
+			begin
+				cap := dGameRecord [move].FirstCapture;
+				while cap <> 0 do
+					begin
+						n := n + 1;
+						cap := dGameRecord [cap].nextCapture;
+					end;
+			end;
+		NumCaptures := n;
+	end; {NumCaptures}
+
+procedure EachJosekiMgr (pDoc: p2DocInfo; 
+				procedure Visit (var JTree: TJosekiControl; corn: integer; isReflect: Boolean));
+	var 
+		corn: integer; { index into normal and reflected Joseki arrays }	
+	begin
+		for corn := TpRtCorner to BtRtCorner do
+			with pDoc^ do
+				begin
+					if dNormalJoseki [corn].JosekiTree <> nil then
+						begin
+							{$IFC TraceJoseki}
+							writeln ('Visit Normal corn: ', corn:1);
+							{$ENDC}
+							Visit (dNormalJoseki [corn], corn, false);
+						end;
+					if dReflectJoseki [corn].JosekiTree <> nil then
+						begin
+							{$IFC TraceJoseki}
+							writeln ('Visit Reflect corn: ', corn:1);
+							{$ENDC}
+							Visit (dReflectJoseki [corn], corn, true);
+						end;
+				end;
+	end; {EachJosekiMgr}
+
+procedure NewMoveTreeNode (g: p2Graph; var root: p2TreeNode; pt: p2GOPoint);
+	{ Create a new tree node. }
+	{ initialize the pointer fields to nil and the coordinate fields to zero. }
+	{ g is used to distinguish different flavors of TreeNodes: }
+	{  PointGraph: "normal" TreeNodes. }
+	{  StringGraph: Joseki TreeNodes. }
+	begin
+		with g^ do
+			begin
+				if AvailMoveTreeNodes = nil then
+					MoreMoveTreeNodes (g);
+				root := AvailMoveTreeNodes;
+				AvailMoveTreeNodes := AvailMoveTreeNodes^.FirstContinuation;
+			end;
+		with root^ do
+			begin
+				if pt = nil then
+					begin
+						TreeMoveX := 0;
+						TreeMoveY := 0;
+					end
+				else with pt^ do
+					begin
+						TreeMoveX := XCoord;
+						TreeMoveY := YCoord;
+					end;
+				FirstContinuation := nil;
+				NextAlternative := nil;
+			end;
+	end; {NewMoveTreeNode}
+	
+procedure PrintPointItem (p: p2Node);
+	var x,y : integer;
+	begin
+		if p = nil then
+			write ('pass')
+		else
+			with p2GoPoint(p)^ do
+				WritePoint (XCoord, YCoord);
+	end; {PrintPointItem}
+	
+procedure PrintPointList (l : p2ListItem);
+	var temp : p2ListItem;
+	begin
+		temp := l;
+		while temp <> nil do 
+			begin
+				PrintPointItem(temp^.ListItem);
+				temp := temp^.NextListItem;
+				if temp<> nil then write(', ');
+			end;
+	end; {PrintPointList}
+	
+procedure PrintAnalPointItem (Anal : p2Analysis);
+	begin
+		if Anal = nil then
+			write (' No Analysis')
+		else 
+			with Anal^ do
+				begin
+					{$R-}
+					if targLevel = TGraphLevel(-1) then
+						write('***Error*** printing an Analysis on the free list!.');
+					{$IFC RangeChk}
+						{$R+}
+					{$ELSEC}
+						{$R-}
+					{$ENDC}
+					PrintPointItem(target);
+					write(' value: ',result:1);
+					if attackTree = nil then
+						write(' ATree: nil ')
+					else
+						begin
+							write(' ARoot: '); 
+							with attackTree^ do
+								WritePoint (TreeMoveX, TreeMoveY);
+						end;
+					if defendTree = nil then
+						write(' DTree: nil ')
+					else 
+						begin
+							write(' DRoot: '); 
+							with defendTree^ do
+								WritePoint (TreeMoveX, TreeMoveY);
+						end;
+				end;
+	end; {PrintAnalPointItem}
+	
+procedure PrintAnalPointList (List : p2ListItem);
+	var temp : p2ListItem;
+		tempAnal : p2Analysis;
+	begin
+		temp := List;
+		while temp <> nil do begin
+			tempAnal := p2Analysis (temp^.ListItem);
+			if tempAnal = nil then
+				write ('no analysis')
+			else
+				with tempAnal^ do
+					begin
+						PrintPointItem(target);
+						write(' value is ',result:1);
+						if attackTree = nil then
+							write(' attackTree = nil ')
+						else write(' attackTree <> nil '); 
+						if defendTree = nil then
+							write(' defendTree = nil ')
+						else write(' defendTree <> nil '); 
+						temp := temp^.NextListItem;
+						if temp<>nil then writeln(' ')
+						else writeln('end of list');
+					end;
+		end;
+	end; {PrintAnalPointList}

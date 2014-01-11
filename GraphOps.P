@@ -1,0 +1,357 @@
+{	GraphOps	Pascal Unit
+
+	DESCRIPTION
+		Definitions of Graphs (Nodes, Arcs) and Partitions suitable
+		for inclusion in an Application.
+		
+		GraphOps -- Graph Operators.
+		Implements "undirected" graph operations as a directed graph
+		with ord4(FromNode) <= ord4(ToNode).
+	
+		Supports implementation of "Abstraction Hierarchies" as defined in
+		"Abstraction Hierarchies: A Model of Perception and Cognition
+		in the Game of GO", Ph.D. dissertation, U.C. Santa Cruz, 1980.
+	
+	AUTHOR
+		Ken Friedenbach
+		Copyright 1986, 1981, 1980
+		All Rights reserved.
+	
+	BUGS
+}
+
+{$I Flags.p} {Global options for compilations}
+
+UNIT GraphOps;
+
+INTERFACE
+
+uses 
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+		Utilities;
+		
+		{Memory Management Primitives}
+const
+	ChunkFreeNode = -1;
+	
+type
+
+	ChunkList = ^ChunkRecord;
+	ChunkRecord =
+		record
+			nextChunk: ChunkList;
+			Stuff: SignedByte;
+			{ more stuff }
+		end;
+
+procedure DisposeChunks (var AList: ChunkList);	
+	{ free a list of chunks }
+
+type
+		{ unified Graph, Partition, and Abstraction plane data structures }
+
+	p2Arc = ^TArc;
+	p2Node = ^TNode;
+	p2ListItem = ^TListItem;
+
+	TListItem = 
+		record
+			ListItem: p2Node;
+			NextListItem: p2ListItem
+		end;
+		
+	p2TreeNode = ^TreeNode;
+	TreeNode = 
+		record
+			TreeMoveX, TreeMoveY: integer;
+			FirstContinuation: p2TreeNode;
+			NextAlternative: p2TreeNode;
+		end;
+		
+	TJosekiValue = 
+		(GoodJosekiMove, 	{ default }
+		BadJosekiMove);		{ [bad] }
+		
+	p2ConditionNode = ^ConditionNode;
+	ConditionNode =
+		record
+			cond: integer;
+			condX, condY: integer; { location }
+			nextCond: p2ConditionNode;
+		end;
+		
+	p2JosekiTreeNode = ^JosekiTreeNode;
+	JosekiTreeNode =
+		record
+			tree: TreeNode;
+			value: TJosekiValue;
+			conditions: p2ConditionNode;
+		end;
+		
+		{ Application definition of levels: (assumes linear hierarchy) }
+	TGraphLevel = (PointsGraphLevel, StringsGraphLevel, BlocksGraphLevel, 
+		GroupsGraphLevel, AreasGraphLevel);
+
+	p2Analysis = ^TAnalysis;
+	TAnalysis =
+		record
+			result: integer;
+			target: p2Node;
+			targLevel: TGraphLevel;
+			attackTree: p2TreeNode;	{Lookahead tree rooted at an attacking move. }
+			defendTree: p2TreeNode;	{Lookahead tree rooted at a defending move. }
+		end;
+		
+	TNode =
+		record
+				{ Information for all levels: }
+			Parent: p2Node;				{ for Points: PtNode: p2GOString }
+			Sibling: p2Node; 			{ for Points: NextPtSameString: p2GoPoint }
+			HighState: integer;			{ for Points: PtStrType: integer }
+			Marked: Boolean;			{ for Points: PtMarked: Boolean }
+			Filler2: Boolean;
+				{ Information for levels two and above: }
+			{$IFC doArcListCounts}
+			InSize,OutSize: Byte;		{ count of edges on InList and OutList }
+			{$ENDC}	
+			InList, 					{ Note: for GO, dBoard is 19 x 19 array. }
+			OutList: p2Arc;				{ Other applications may need Graph lists
+								 		 at first level. }
+			Child: p2Node;				{ list of component parts at lower level }
+			LowState: integer; 			{ i.e. HighState of component parts }
+				{ Application information about nodes... }
+			{$IFC DebugDraw}
+			TheCenter: p2Node;			{ component used as center in drawing }
+			{$ENDC}
+		end;
+		
+	TArc =
+		record
+				{ Graph arc }
+			FromNode, ToNode: p2Node;
+			InNext, OutNext: p2Arc;
+				{ Abstraction plane }
+			ImageCount: integer;
+				{ Application information about arcs... }
+		end;
+
+type
+	
+	p2Graph = ^Graph;
+	Graph =
+		record
+					{ for initialization: a first node }
+			InitNode: p2Node;
+			
+					{ Graph level in Hierarchy, higher, lower graphs }
+			GraphLevel: TGraphLevel;
+			HighGraph,
+			LowGraph: p2Graph;
+			
+					{ High State Functions } 
+			ComputeHigh: ProcPtr;
+				{ function ComputeHigh (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer; }
+			ComputeNew: ProcPtr;
+				{ function ComputeNew (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer; }
+				
+					{ Memory Management Interfaces: }
+					{ Nodes: }
+			AvailNodes: p2Node;
+			NodeChunckList: ChunkList;
+				{ chained through Parent field, marked with HighState = -1 }
+			MoreNodes: ProcPtr;
+				{ procedure MoreNodes, makes AvailNodes <> nil }
+				{ There is more than one size of Node. }
+
+					{ Arcs: }
+			AvailArcs: p2Arc;
+			ArcChunckList: ChunkList;
+				{ chained through InNext field, marked with ImageCount = -1 }
+			MoreArcs: ProcPtr;
+				{ procedure MoreArcs, makes AvailArcs <> nil }
+				{ There is more than one size of Arc. }
+
+					{ MoveTreeNodes: }
+			AvailMoveTreeNodes: p2TreeNode;
+			AvailMoveTreeChunckList: ChunkList;
+				{ chained through FirstContinuation field. }
+				{ marked with TreeMoveX = -1 }
+			{ MoreMoveTreeNodes: ProcPtr; }
+				{ procedure MoreMoveTreeNodes, makes AvailMoveTreeNodes <> nil }
+				{ All MoveTreeNodes are the same size, so call directly. }
+
+					{ ListItems: }
+			AvailListItems: p2ListItem;
+			ListItemsChunkList: ChunkList;
+			{ MoreListItems: ProcPtr; does not need to be stored. }
+				{ procedure MoreListItems, AvailListItems <> nil }
+				{ All ListItems are the same size, so call directly. }
+
+					{ Analysis nodes: }
+			AvailAnalyses: p2Analysis;
+				{ chained through attackTree field }
+				{ free analysis are marked with targLevel = ord(-1) }
+			AnalysesChunkList: ChunkList;
+			{ MoreAnalyses: ProcPtr; does not need to be stored. }
+				{ procedure MoreAnalyses, AvailAnalyses <> nil }
+				{ All Analysis nodes are the same size, so call directly. }
+
+					{ Deferred requests for changes: }
+			ChangeList: p2ListItem;
+				{ list of points, whose objects at this level require checking }
+				
+		end;
+		
+{$IFC doFindEdgeStats}
+var
+	FindEdgeStats: array [0..20] of longint;
+{$ENDC}	
+	
+
+procedure InitGraph (g:p2Graph;
+					Lev: TGraphLevel; 
+					HiG, LowG: p2Graph;
+					CmpHi, CmpNew: ProcPtr;
+					MoreN, MoreA: ProcPtr);
+	{ Called once during initial allocation. Sets all fields to initial values. }
+	
+procedure GOEngineError (message: str255; errorNum, format: integer);
+	{ All errors in the GO Engine are reported through this routine. }
+	{ Defined by the run-time environment. }
+	{ Formats supported: }
+	{	0 "message" }
+	{	1 "message: "errorNum"." }
+	{	2 ... }
+
+procedure ClearGraph (g:p2Graph);
+	{ Dispose of releated chunks of memory, and clear. }
+	
+	{ Partition Operations }
+
+procedure AddElement (part: p2Node; e: p2Node);
+{ Add an element to a partition }
+
+procedure DeleteElement (part: p2Node; e: p2Node);
+{ Delete an element from a partition }
+
+function NumElements (part: p2Node): integer;
+{ counts the number of elements in a partition }
+
+procedure EachElement (part: p2Node; procedure Visit (p2: p2Node));
+{ Visits each member of a partition. }
+{ "Looks" ahead on list, so visited element can be deleted. }
+
+	{ Graph Operations }
+	
+function AddEdge (g: p2Graph; fromN, toN: p2Node): p2Arc;
+{ Add an undirected edge between two nodes }
+	
+function AddNode (g: p2Graph; lo: integer): p2Node;
+{ Add an isolated node }
+	
+procedure DelEdge (g: p2Graph; fromN, toN: p2Node);
+{ Delete an undirected edge between two nodes }
+	
+procedure DelNod (g: p2Graph;  n: p2Node);
+{ Delete an isolated node }
+
+procedure EachAdjNode (n: p2Node; procedure Visit (n2: p2Node));
+{ Visit each adjacent node to a given node }
+
+procedure EachIncidentArc (n: p2Node; procedure Visit (a: p2Arc));
+{ Visit each incident arc to a given node }
+
+function FindEdge (fromN, toN: p2Node): p2Arc;
+{ Find the undirected edge between fromN and toN. Return nil if none. }
+
+	{ Node List Operations }
+
+procedure MoreListItems (g: p2Graph);
+
+procedure ReturnToAvailList (g: p2Graph; var list: p2ListItem);
+{ called to return the storage used for a stack or list }
+
+function StackSize (list: p2ListItem): integer;
+{ returns the number of elements on a stack or list }
+
+procedure Push (g: p2Graph; var list: p2ListItem; nod: p2Node);
+{ push a node on a stack, allocating from availList }
+
+function Pop (g: p2Graph; var stack: p2ListItem): p2Node;
+{ pop a node from a stack, return the node, place cell on availList }
+{ Pop defends itself against empty stack problems.  Returns nil. }
+
+procedure Delete(g : p2Graph; x : p2Node; var list : p2ListItem);
+	{ Delete will remove the first instance of node x ffrom the }
+	{ list.  It does nothing if x is not found. }
+	
+function PushUnique (g: p2Graph; var List: p2ListItem; nod: p2Node): Boolean;
+	{ if nod is not already on the List then this will Push it; }
+	{ else it will do nothing. }
+	{ Returns true if this call reuired nod to be added to list. }
+
+procedure JoinStacks(var High, Low : p2ListItem);
+{Join two linked lists into one.  Puts the Low stack onto the High stack under
+the current items.  Low stack is set to nil.}
+
+procedure PopEach (g: p2Graph; var list: p2ListItem; 
+	procedure Visit (g: p2Graph; p: p2Node));
+{ pop each element off a stack, Visit the node, return to availList }
+
+procedure AddEveryOtherPoint (g : p2Graph; var PointPair, Return : p2ListItem);
+	{ This procedure will remove all the points from PointPair. }
+	{ Every other one, including the first, will be put onto Return. }
+
+	{ for debugging: }
+procedure WriteLev (Lev:TGraphLevel);
+{ write the Graph Level }
+
+	{ Move Trees }
+procedure ReturnTree (g: p2Graph; var root: p2TreeNode);
+	{ Return a tree node, and its subtrees, to the avail list }
+	
+procedure PrintTree(root : p2TreeNode);
+	{ Print a tree in parenthesis notation. }
+	
+procedure AddChild (par: p2TreeNode; child: p2TreeNode);
+	{ Add child as a descendent of par. }
+	{ if the first child, add as the FirstContinuation of par. }
+	{ if not the first child, add to the end of the list of NextAlternatives. }
+
+procedure AddSibling (var FirstSibling: p2TreeNode;  NextSibling : p2TreeNode);
+	{ Add a Sibling to FirstSibling }
+	{ Adds at tail of list. }
+	{ Handles nil FIrstSibling correctly }
+
+function FindChild (root: p2TreeNode; x, y: integer): p2TreeNode;
+	{ Search the Children of root, looking for a child with coordinates x, y. }
+	{ Returns nil if no such child is found. }
+
+procedure ForEachChild (root: p2TreeNode; procedure Visit (t: p2TreeNode));
+	{ For each child of root, call the procedure Visit. }
+
+	{ Analysis Nodes }
+function NewAnalysis (g: p2Graph; res: integer; ATree, DTree: p2TreeNode; 
+		targ: p2Node {p2GOPoint of node}; targlev: TGraphLevel): p2Analysis;
+	{ Create a new tree node. }
+	{ Set res to be the default result. }
+	{ Set ATree and DTree to be the AttackTree and DefendTree of moves }
+	{ Set targ to be a point of the target }
+	
+procedure ReturnAnalysis (g: p2Graph; var anal: p2Analysis);
+	{ Return an analysis node, and its move trees, to the avail lists }
+	
+	{ for use in BoardOps2.p ONLY!}
+procedure MoreMoveTreeNodes (g: p2Graph);
+
+		{ Point debugging }		
+procedure WritePoint (X, Y: integer);
+	{ write coordinates X, Y in the form 'D 4', 'J 10' , etc. }
+	
+
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I GraphOps2.p}
+END. {GraphOps}

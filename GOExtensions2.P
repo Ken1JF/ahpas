@@ -1,0 +1,1068 @@
+{$S GOExtensions }
+{ Implementation of GOExtensions
+
+	AUTHOR
+			Arthur Molin
+			Copyright 1988
+			All Rights Reserved.
+
+}
+
+{
+	Notes on heuristics of "goodness of move."
+		TestAdjGroups decides if the territory is good to move into -- if it is surrounded by
+			good groups to approach, and if it is Corner, Edge, what have you.
+			Called from FindPointsNAway.
+	xxx	isNAway decides if the point is on a good line for extending purposes.
+		FindPointsNAway decides if the territory is large enough.  If FarthestPoint must be
+			returned, FindPointsNAway deducts more points for a small, cramped move.
+	xxx	ExtendOff decides if the group to be extended from needs the extension.  Also decides
+			how big of an extension can be tolerated.
+}
+{ Evaluate Terr is not called.}
+
+procedure PrintList (l : p2ListItem);
+	var temp : p2ListItem;
+	begin
+		temp := l;
+		while temp <> nil do 
+			begin
+				with p2GoPoint(temp^.ListItem)^ do
+					WritePoint (XCoord, YCoord);
+				temp := temp^.NextListItem;
+				if temp <> nil then
+					write (', ');
+			end;
+	end; {PrintList}
+	
+procedure PrintGroupItem (G : p2Node);
+	begin
+		PrintPointItem(G^.Child^.Child^.Child);
+	end; {PrintGroupItem}
+	
+procedure PrintGroupColor(p:p2Node);
+var
+   LowS : BlockHighState;
+begin
+	write(' The Block Color of the group at point ');
+	PrintPointItem(p^.Child^.Child^.Child);
+	write(' is ');
+	LowS.BlockStateInt := p^.LowState;
+	case LowS.BlockTyp of
+		UnknBlockType:write('UnknBlockType');
+		DisputedGroup:write('DisputedGroup');
+		BlackGroup:write('BlackGroup');
+		WhiteGroup:write('WhiteGroup');
+		CornerTerrBlock, CornerDevBlock:write('Corner Block');
+		EdgeTerrBlock:write('EdgeTerrBlock');
+		MidTerrBlock:write('MidTerrBlock');
+	end;
+	writeln;
+end;
+
+function GroupDame(p : p2Node) : integer;
+	{ This STATIC function will return an estimate of the number }
+	{ of "liberties" of the group in question. }
+
+	var NumAdjTerritories : integer;
+		GroupColor : TBlockType;
+		LowS : BlockHighState;
+	
+	procedure EvaluateTerritory ( AdjGroup : p2Node );
+		var LowS : BlockHighState;
+			GoodTerr : boolean;
+		procedure AdjToTerr ( AdjGroup2 : p2Node );
+			var	LowS2 : BlockHighState;
+			begin
+				LowS2.BlockStateInt := AdjGroup2^.LowState;
+				if LowS2.BlockTyp >= FirstTerrBlock then
+					GoodTerr := true  {Territory leads to more territory.}
+				else if (LowS2.BlockTyp = GroupColor) and (AdjGroup2 <> p) then
+					{ Can connect to another group }
+					{ xxx Make sure that that group is not dead! }
+					GoodTerr := true;
+			end;
+				
+		begin
+			LowS.BlockStateInt := AdjGroup^.LowState;
+			if LowS.BlockTyp >= FirstTerrBlock then
+				{Is AdjGroup big enough to bother running towards?}
+				begin
+					GoodTerr := false;
+					EachAdjNode ( AdjGroup, AdjToTerr );
+					if GoodTerr then
+						NumAdjTerritories := NumAdjTerritories + 1;
+				end
+			else if LowS.BlockTyp = GroupColor then
+					{ Adjacent to another group. ??? }
+					{ xxx Make sure that that group is not dead! }
+					begin
+						NumAdjTerritories := NumAdjTerritories + 1;
+					end;
+		end;
+		
+	begin {GroupDame}
+		LowS.BlockStateInt := p^.LowState;
+		GroupColor := LowS.BlockTyp;
+		NumAdjTerritories := 0;
+		EachAdjNode(p, EvaluateTerritory);
+		GroupDame := NumAdjTerritories;
+	end; {GroupDame}
+
+
+function StrengthOf (Grp : p2Node) : integer;
+	{ This function will return the strength of the }
+	{ input group.  Available strengths are : VeryWeak, Weak, }
+	{ Intermediate, Strong, VeryStrong. }
+	var 
+		NumInteriorLibs, NumExteriorLibs, NumStones, NumGroupDame : integer;
+		tempStrength : integer;
+		grpColor : TStringType;
+		
+	{  Cut from GoMover }			
+	procedure CountGroupStrings (p3: p2Node {a String});
+		var surrounded: Boolean;
+		
+		procedure ChkIfSurrounded (adjP: p2Node);
+			begin
+				if adjP^.Parent^.Parent <> Grp then
+					surrounded := false;
+			end; {ChkIfSurrounded}
+			
+		var LowS: StringHighState; n: integer;
+		begin {CountGroupStrings}
+			LowS.StrStateInt := p3^.HighState;
+			n := NumElements (p3);
+			if LowS.StrTyp >= FirstTerrStringType then
+				NumInteriorLibs := NumInteriorLibs + n
+			else
+				case LowS.StrTyp of
+					BlackStonesStr, WhiteStonesStr:
+						if LowS.StrTyp = grpColor then
+							NumStones := NumStones + n
+						else
+							NumInteriorLibs := NumInteriorLibs + n;
+					BlkLibStr, JntLibStr, WhtLibStr:
+						begin
+							surrounded := true;
+							EachAdjNode (p3, ChkIfSurrounded);
+							if surrounded then
+								NumInteriorLibs := NumInteriorLibs + 1
+							else
+								NumExteriorLibs := NumExteriorLibs + 1;
+						end;
+				end; {cases}
+		end; {CountGroupStrings}
+		
+	procedure CountGroupBlocks (p2: p2Node {a block});
+		begin
+			EachElement (p2, CountGroupStrings);
+		end; {CountGroupBlocks}
+		
+	var	{StrengthOf}
+		lowS: BlockHighState;
+	{  Cut from GoMover }
+		
+	begin  {StrengthOf}
+		{$IFC TraceExtensions}
+				write('Entering StrengthOf on group ');
+				PrintGroupItem(Grp);
+		{$ENDC}
+		lowS.BlockStateInt := Grp^.LowState;
+		if lowS.BlockTyp = BlackGroup then
+			grpColor := BlackStonesStr
+		else
+			grpColor := WhiteStonesStr;
+		NumGroupDame := GroupDame ( Grp );
+		NumInteriorLibs := 0;
+		NumExteriorLibs := 0;
+		NumStones := 0;
+		EachElement (Grp, CountGroupBlocks);
+		tempStrength  := Intermediate;
+		if NumGroupDame > 4 then   {If the group can expand...}
+			tempStrength := tempStrength + 1
+		else if NumGroupDame < 2 then
+			tempStrength := tempStrength - 1;
+		if NumInteriorLibs > 6 then  {If the group can [probably] live inside...}
+			tempStrength := tempStrength + 1
+		else if NumInteriorLibs < 3 then
+			tempStrength := tempStrength - 1;
+		if NumExteriorLibs / NumStones > 3 then  {If the group is very light then...}
+			tempStrength := tempStrength + 1;     {No strength penalty for heavyness.}
+		if tempStrength > 5 then tempStrength := 5;
+		{$IFC TraceExtensions}
+				writeln('; strength is ',tempStrength : 1);
+		{$ENDC}
+		StrengthOf := tempStrength;
+	end; {StrengthOf}
+
+function GetPointsOfGroup (g : p2Graph;  Grp : p2Node ) : p2ListItem;
+	{ Get the points of the Group Grp.  Push them as p2Node onto }
+	{ the returned list. }
+	var
+		tempReturn : p2ListItem;
+	procedure forEachBlock (Blk : p2Node);
+		procedure forEachStr (Str : p2Node);
+			procedure forEachPnt (Pnt : p2Node);
+				begin {forEachPnt}
+					Push (g, tempReturn, Pnt);
+				end; {forEachPnt}
+			begin {forEachStr}
+				EachElement (Str, forEachPnt);
+			end; {forEachStr}
+		begin
+			EachElement (Blk, forEachStr);
+		end;
+	begin {GetPointsOfGroup}
+		tempReturn := nil;
+		EachElement (Grp, forEachBlock);
+		GetPointsOfGroup := tempReturn;
+	end; {GetPointsOfGroup}
+	
+function StonesAtEdge (pDoc : p2DocInfo; g : p2Graph; Grp : p2Node; 
+						LibList : p2ListItem) : p2ListItem;
+	{ StonesAtEdge takes a list of liberties, and returns a list of stones }
+	{ which are members of Grp and are adjacent to a liberty of the list }
+	var 
+		tempReturn : p2ListItem;
+		
+	procedure TestAdjToLib (pDoc: p2DocInfo; AdjPt: p2GOPoint);
+		begin {TestAdjToLib}
+			if (AdjPt^.PtStrType.PtOcc = BlackOcc) or 
+					(AdjPt^.PtStrType.PtOcc = WhiteOcc) then
+				if AdjPt^.PtNode^.Parent^.Parent = Grp then
+					if PushUnique (g, tempReturn, p2Node (AdjPt) ) then
+						{nothing to do};
+		end; {TestAdjToLib}
+		
+	begin {StonesAtEdge}
+		tempReturn := nil;
+		while LibList <> nil do
+			begin
+				EachAdjPoint(pDoc, p2GOPoint(LibList^.ListItem), TestAdjToLib);
+				LibList := LibList^.NextListItem;
+			end;
+		StonesAtEdge := tempReturn;
+	end; {StonesAtEdge}
+
+function FindGroupContactPoints (gH : p2GOAbstHier; Grp1, Grp2:p2Node) : p2ListItem;
+	{ The list returned contains a pair of p2GoPoints, the first a point }
+	{ of Grp1, the second a point of Grp2, and the points are adjacent. }
+	var
+		Grp1Points, adjPoints : p2ListItem;
+	procedure FindAdjPoint (g : p2Graph; G1Point : p2Node);
+		{ G1Point is a point of Grp1. }
+		{ We want to find if it is adjacent to a point of Grp2, and if so, }
+		{ which point. }
+		procedure testAdjPoint (pDoc : p2DocInfo; possG2Point : p2GOPoint );
+			{ We test to see if possG2Point is a point of Blk2, and if so, }
+			{ we push it and G1Point onto adjPoints of FindContactPoints }
+			begin
+				if possG2Point^.PtNode^.Parent^.Parent = Grp2 then
+					with gH^ do 
+						begin
+							Push (@PointGraph, adjPoints, p2Node (possG2Point) );
+							Push (@PointGraph, adjPoints, G1Point);
+						end;
+			end;
+		begin {FindAdjPoint}
+			EachAdjPoint (@gH^.DocumentInfo, p2GoPoint (G1Point), testAdjPoint);
+		end; {FindAdjPoint}
+	begin {FindGroupContactPoints}
+		adjPoints := nil;
+		Grp1Points := GetPointsOfGroup (@gH^.PointGraph, Grp1);
+		PopEach (@gH^.PointGraph, Grp1Points, FindAdjPoint);
+		FindGroupContactPoints := adjPoints;
+	end; {FindGroupContactPoints}
+	
+function Distance (pt1, pt2 : p2Node ): integer;
+	{ Returns the cartesian distance between two }
+	{ Points given by p2Nodes. }
+	begin
+		with p2GOPoint(pt1)^ do
+			Distance := abs (XCoord - p2GOPoint(pt2)^.XCoord) + 
+				abs (YCoord - p2GOPoint(pt2)^.YCoord) - 1;
+	end;
+	
+function DistanceToEdge (Pnt : p2Node; EdgeOfGrp : p2ListItem) : integer;
+	{ Answers the question of the shortest distance from a point of }
+	{ EdgeOfGrp to Pnt. Pnt is a p2Node GoPoint. }
+	
+	var 
+		MinToTerrGroup, DistanceToPnt : integer;
+		PntOfG2 : p2ListItem;
+
+	begin {DistanceToEdge}
+		{$IFC TraceExtensions}
+		if TraceDistance then
+			begin
+				write('Entering DistanceToEdge on point ');
+				PrintPointItem(Pnt);
+				writeln;
+			end;
+		{$ENDC}
+		MinToTerrGroup := 100;  {Bigger than any possible.}
+		PntOfG2 := EdgeOfGrp;
+		while PntOfG2 <> nil do 
+			begin
+				DistanceToPnt := Distance (Pnt, PntOfG2^.ListItem);
+				if MinToTerrGroup > DistanceToPnt then
+					MinToTerrGroup := DistanceToPnt;
+				PntOfG2 := PntOfG2^.NextListItem;
+			end;
+		{$IFC TraceExtensions}
+		if TraceDistance then
+			begin
+				writeln('Shortest Distance is ', MinToTerrGroup:1);
+			end;
+		{$ENDC}
+		DistanceToEdge := MinToTerrGroup;
+	end; {DistanceToEdge}
+
+type 
+	p2SurrGrp = ^TSurroundingGroup;
+	TSurroundingGroup = 
+		record
+			Group : p2Node;
+			Edge : p2ListItem;
+			Strength : integer;
+			Friend : boolean;
+		end;
+
+procedure EvaluateExtensions (gH : p2GOAbstHier; StonesGrp, TerrGroup : p2Node; 
+								var Extensions : p2ListItem; GetTerr : boolean);
+	{ Extensions is a list of p2Analysis points that need to have their }
+	{ "result" fields set. }
+	{ They are all extensions off of StonesGrp into TerrGroup. } 
+		{ Issues : Is it Edge, CornerDev, Center, Corner ? }
+		{ Does it lead to new territory  }
+		{ Does it approach strong/weak OurGroups? }
+		{ Does it approach strong/weak TheirGroups? }
+var 
+	tempValue : integer;
+	DistancetoGrp : integer;
+	AdjToTerrList : p2ListItem;
+	StonesGrpStr : integer;
+	StonesBaseValue, TerrBaseValue : integer;
+	NumbAdjTerr, NumbAdjEnemy, NumbAdjFriend : integer;
+	tempMovePntr : p2ListItem;
+	tempAnal : p2Analysis;
+	TerrLowS : BlockHighState;
+	GrpLowS : BlockHighState;
+	
+	procedure FindContactBlocking;
+		{ Input and output via uplevel adressings. }
+		{ This procedure will see if a move blocking the opponent }
+		{ out of a 2nd Line territory is necessary, and if so, }
+		{ will propose such a move. }
+		var
+			tempAdjList : p2ListItem;
+			tempAdjGrp : p2SurrGrp;
+			tempEdgeList : p2ListItem;
+			tempEdgePnt : p2GOPoint;
+			
+		procedure findApproach(pDoc : p2DocInfo; Pnt2 : p2GOPoint);
+		var
+			HighS : PointHighState;
+			tempAnalysis : p2Analysis;
+			begin
+				{$IFC TraceExtensions}
+						writeln (' entering findApproach on point');
+						with Pnt2^ do
+							WritePoint(XCoord, YCoord);
+				{$ENDC}
+				HighS := Pnt2^.PtStrType;
+				if HighS.PtOcc = LibertyOcc then
+					begin
+						case HighS.BlAdjWhAdj of
+							B1W1, B2W1, B1W2, B3W1, B2W2, B1W3:
+								{ Joint Liberty, that should be an edge-blocking move. }
+								if HighS.Lin1 < tempEdgePnt^.Line then
+									begin
+										tempAnalysis := NewAnalysis (@gH^.PointGraph, 4, 
+															nil, nil, p2Node(Pnt2), GroupsGraphLevel);
+										{$IFC TraceExtensions}
+												write (' in findApproach, added analysis is ');
+												PrintAnalPointItem(tempAnalysis);
+												writeln;
+										{$ENDC}
+										Push (@gH^.PointGraph, Extensions, p2Node(tempAnalysis) );
+									end;
+						end; {case}
+					end
+				else
+					begin
+						{$IFC TraceExtensions}
+								writeln (' Not a liberty point ');
+						{$ENDC}
+					end;
+				
+			end; {findApproach}
+			
+		begin {FindContactBlocking}
+			{$IFC TraceExtensions}
+					writeln (' Entering FindContactBlocking ');
+			{$ENDC}
+			tempAdjList := AdjToTerrList;
+			while tempAdjList <> nil do
+				begin
+					tempAdjGrp := p2SurrGrp (tempAdjList^.ListItem);
+					tempAdjList := tempAdjList^.NextListItem;
+					if tempAdjGrp^.Friend then
+						begin
+							tempEdgeList := tempAdjGrp^.Edge;
+							while tempEdgeList <> nil do
+								begin
+									tempEdgePnt := p2GOPoint (tempEdgeList^.ListItem);
+									tempEdgeList := tempEdgeList^.NextListItem;
+									{We have a friendly point adjacent to a territory.}
+									if (tempEdgePnt^.Line <= 4) then
+										{we have a stone on the fourth line or less.  
+											Is it approached?}
+										begin										
+											EachAdjPoint (@gH^.DocumentInfo, tempEdgePnt, 
+												findApproach);
+										end;
+								end; {while tempEdgeList <> nil}
+						end; {tempAdjGrp^.Friend}
+				end; {while tempAdjList...}
+		end; {FindContactBlocking}
+	
+	
+	procedure EvalAdjGroups (AdjGrp : p2Node);
+		{ What groups surround the Territory groups that }
+		{ These moves extend into? }
+		var AdjGrpLowS : BlockHighState;
+			AdjGrpStr : integer;
+			tempSGrp : p2SurrGrp;
+			PntsOfTerrGroup, ContactPoints : p2ListItem;
+		begin
+			tempSGrp := nil;
+			AdjGrpLowS.BlockStateInt := AdjGrp^.LowState;
+			if AdjGrpLowS.BlockTyp = GrpLowS.BlockTyp then
+				begin
+					new (tempSGrp);
+					tempSGrp^.Group := AdjGrp;
+					tempSGrp^.Friend := true;
+					NumbAdjFriend := NumbAdjFriend + 1;
+					tempSGrp^.Strength := StrengthOf(AdjGrp);
+					PntsOfTerrGroup := nil;
+					ContactPoints := nil;
+					PntsOfTerrGroup := GetPointsOfGroup (@gH^.PointGraph, TerrGroup);
+					ContactPoints := FindGroupContactPoints (gH, StonesGrp, TerrGroup);
+					with gH^ do
+						tempSGrp^.Edge := StonesAtEdge (@DocumentInfo, @PointGraph, StonesGrp, ContactPoints); 
+				end
+			else if AdjGrpLowS.BlockTyp = DisputedGroup then
+				begin
+					{xxx ???}
+				end
+			else if AdjGrpLowS.BlockTyp < FirstTerrBlock then
+				begin {must be the enemy.}
+					new (tempSGrp);
+					tempSGrp^.Group := AdjGrp;
+					tempSGrp^.Friend := false;
+					NumbAdjEnemy := NumbAdjEnemy + 1;
+					tempSGrp^.Strength := StrengthOf(AdjGrp);
+					PntsOfTerrGroup := nil;
+					ContactPoints := nil;
+					PntsOfTerrGroup := GetPointsOfGroup (@gH^.PointGraph, TerrGroup);
+					ContactPoints := FindGroupContactPoints (gH, StonesGrp, TerrGroup);
+					with gH^ do
+						tempSGrp^.Edge := StonesAtEdge (@DocumentInfo, @PointGraph, StonesGrp, ContactPoints); 
+				end
+			else {This is a territory group.}
+				begin
+					NumbAdjTerr := NumbAdjTerr + 1;  {xxx Later : size of territory group?}
+				end;
+				
+			if tempSGrp <> nil then
+				Push (@gH^.PointGraph, AdjToTerrList, p2Node (tempSGrp) );
+		end;
+		
+	function EvaluateTerr (Grp : p2Node) : integer;
+		{ Is this Grp in a good territory to expand into? }
+		{ Issues : Is it Edge, CornerDev, Center, Corner ? }
+		{ Or is it DisputedGroup? }
+		{ Is already held by Friend?  Or does it approach Foe? }
+		var
+			GrpLowS : BlockHighState;
+			tempValue : integer;
+		begin {EvaluateTerr}
+			{$IFC TraceExtensions}
+					write('Entering Evaluate Terr. ');
+			{$ENDC}
+			GrpLowS.BlockStateInt := Grp^.LowState;
+			if GrpLowS.BlockTyp = EdgeTerrBlock then
+				tempValue := 1
+			else if GrpLowS.BlockTyp = CornerTerrBlock then
+				tempValue :=  - 1
+			else if GrpLowS.BlockTyp = CornerDevBlock then
+				tempValue := 0
+			else if GrpLowS.BlockTyp = MidTerrBlock then
+				tempValue := 0
+			else if GrpLowS.BlockTyp = DisputedGroup then
+				tempValue := 1
+			else GOEngineError ('Non-territory string in EvaluateTerr',0,0);
+			{$IFC TraceExtensions}
+				writeln ('On BlockTyp, tempValue is ', tempValue : 1);
+			{$ENDC}
+			if (NumbAdjEnemy = 0) and (not GetTerr) then 
+				{ This is a bad territory to extend into. }
+				begin
+					tempValue := tempValue - 5;
+					{$IFC TraceExtensions}
+						write ('NumbAdjEnemy = 0 for territory ');
+						PrintGroupItem (Grp);
+						writeln;
+					{$ENDC}
+				end
+			else
+				if (NumbAdjEnemy = 1) and (NumbAdjFriend = 1) then
+					{ This is a very good territory to extend into. }
+					begin
+						tempValue := tempValue + 2;
+						{$IFC TraceExtensions}
+							writeln ('Good territory. tempValue = ', tempValue:1);
+						{$ENDC}
+					end;
+					
+			case NumbAdjTerr of
+				0 :  tempValue := tempValue - 2;
+				1 :  tempValue := tempValue - 1;
+				2 :  tempValue := tempValue;
+				3 :  tempValue := tempValue + 1;
+				otherwise  tempValue := tempValue + 2;
+			end;  {cases}
+
+			{$IFC TraceExtensions}
+				writeln ('EvaluateTerr is returning ', tempValue:1);
+			{$ENDC}
+		
+			EvaluateTerr := tempValue;
+		end; {EvaluateTerr}
+		
+	function OneExtension (Pnt : p2GoPoint; AdjGroupList : p2ListItem) : integer;
+		{ This procedure deals with a single point. }
+		{ Issues : is it on a good line? }
+		{ Does it approach strong/weak OurGroups? }
+		{ Does it approach strong/weak TheirGroups? }
+		var 
+			tempValue : integer;
+			tempList : p2ListItem;
+			tempAdjGrp : p2SurrGrp;
+			DistanceToGrp : integer;
+			ApproachDistance : integer;
+		begin {OneExtension}
+				
+			{$IFC TraceExtensions}
+					write('entering OneExtension on ');
+					PrintPointItem (p2Node(Pnt));
+			{$ENDC}
+			
+			if GetTerr then
+				ApproachDistance := 4
+			else
+				ApproachDistance := 2;
+			
+			tempValue := 0;  {No reason to evaluate this move higher.}
+				{ What line is the move on? }
+			if Pnt^.PtStrType.Lin1 = 1 then
+				tempValue := tempValue - 2
+			else if Pnt^.PtStrType.Lin1 = 2 then
+				tempValue := tempValue 
+			else if Pnt^.PtStrType.Lin1 = 3 then
+				tempValue := tempValue + 1
+			else
+				tempValue := tempValue;
+			{Else, no need to subtract for being too high--covered by MidTerrGroup.} 
+			
+			{For Each Adj Group do: }
+				{ Don't want to approach strong groups too closely. }
+				{Do want to be close to (some) weak groups. }
+			tempList := AdjGroupList;
+			while tempList <> nil do 
+				begin {while tempList <> nil}
+					tempAdjGrp := p2SurrGrp (tempList^.ListItem);
+					DistanceToGrp := DistanceToEdge ( p2Node(Pnt), tempAdjGrp^.Edge);
+					if GetTerr then { We want to avoid all groups. }
+						begin
+							if DistanceToGrp < ApproachDistance then
+								tempValue := tempValue - 2;
+						end
+					else
+						case tempAdjGrp^.Strength of
+							VeryWeak:
+								begin
+									if DistanceToGrp < ApproachDistance then  {Approach Weak Groups.}
+										tempValue := tempValue + 2;
+									{$IFC TraceExtensions}
+											write(' Approches VeryWeak group ');
+											PrintGroupItem (tempAdjGrp^.Group);
+											write(' , ');
+									{$ENDC}
+								end;
+							Weak:
+								begin
+									if DistanceToGrp < ApproachDistance then  {Approach Weak Groups.}
+										tempValue := tempValue + 1;
+									{$IFC TraceExtensions}
+											write(' Approches Weak group ');
+											PrintGroupItem (tempAdjGrp^.Group);
+											write(' , ');
+									{$ENDC}
+								end;
+							Intermediate:;
+							Strong:
+								begin
+									if DistanceToGrp < ApproachDistance then  {Avoid Strong Groups.}
+										tempValue := tempValue - 1;
+									{$IFC TraceExtensions}
+											write(' Approches Strong group ');
+											PrintGroupItem (tempAdjGrp^.Group);
+											write(' , ');
+									{$ENDC}
+								end;
+							VeryStrong:
+								begin
+									if DistanceToGrp < ApproachDistance then  {Avoid Strong Groups.}
+										tempValue := tempValue - 2;
+									{$IFC TraceExtensions}
+											write(' Approches VeryStrong group ');
+											PrintGroupItem (tempAdjGrp^.Group);
+											write(' , ');
+									{$ENDC}
+								end;
+						end;  {cases}
+					tempList := tempList^.NextListItem;
+				end; {while tempList <> nil}
+								
+			{$IFC TraceExtensions}
+					writeln('Returning ', tempValue:1);
+			{$ENDC}
+			OneExtension := tempValue;
+		end; {OneExtension}
+		
+	begin {EvaluateExtensions}
+		{$IFC TraceExtensions}
+				write('Entering Evaluate Extensions; territory group is ');
+				PrintGroupItem (TerrGroup);
+				writeln;
+		{$ENDC}
+		{Issues : is it a good group to extend off of?}
+		{Is it a good territory to extend into?}
+		GrpLowS.BlockStateInt := StonesGrp^.LowState;
+		StonesGrpStr := StrengthOf (StonesGrp);
+		case StonesGrpStr of
+			VeryWeak : StonesBaseValue := 3;
+			Weak : StonesBaseValue := 2;
+			Intermediate : StonesBaseValue := 1;
+			Strong : StonesBaseValue := 0;
+			VeryStrong : StonesBaseValue := -1;
+		end;  {cases}
+		
+		AdjToTerrList:= nil;
+		NumbAdjTerr := 0;
+		NumbAdjEnemy := 0;
+		NumbAdjFriend := 0;
+		EachAdjNode (TerrGroup, EvalAdjGroups);
+		{$IFC TraceExtensions}
+				write('NumbAdjFriend is ', NumbAdjFriend:1);
+				writeln('; NumbAdjEnemy is ', NumbAdjEnemy:1,
+							'; Number of Adjacent Terr is ', NumbAdjTerr:1);
+		{$ENDC}
+		
+		 
+		{ Perhaps we should add a contact block play? }
+		TerrLowS.BlockStateInt := TerrGroup^.LowState;
+		if (TerrLowS.BlockTyp = EdgeTerrBlock) or (TerrLowS.BlockTyp = CornerTerrBlock) then
+			FindContactBlocking
+		else {BUG! NO begin-end! with tracing off, case is not done if EdgeTerrBlock}
+			begin
+				{$IFC TraceExtensions}
+						writeln ('Not a Edge Territory.');
+				{$ENDC}
+			end;
+			
+		TerrBaseValue := EvaluateTerr ( TerrGroup );
+		{$IFC TraceExtensions}
+				write('StonesBaseValue is ', StonesBaseValue:1);
+				writeln('; TerrBaseValue is ', TerrBaseValue:1,
+							'; Number of Adjacent Terr is ', NumbAdjTerr:1);
+		{$ENDC}
+
+		tempMovePntr := Extensions;
+		while tempMovePntr <> nil do
+			begin
+				tempAnal := p2Analysis(tempMovePntr^.ListItem);
+				{$IFC TraceExtensions}
+						write('Finding Value of: ');
+						PrintPointItem (tempAnal^.target);
+						write('Previous result = ',tempAnal^.result:1);
+						writeln;
+				{$ENDC}
+				tempAnal^.result := tempAnal^.result + StonesBaseValue + TerrBaseValue
+							 + OneExtension (p2GOPoint (tempAnal^.target), AdjToTerrList);
+				tempMovePntr := tempMovePntr^.NextListItem;
+				{$IFC TraceExtensions}
+						writeln(' evaluating this move at ', tempAnal^.result:1);
+				{$ENDC}
+			end;
+			
+	end;  {EvaluateExtensions}
+	
+
+function AttachingPlay (gH : p2GOAbstHier; DisputedGrp, StonesGrp : p2Node):p2ListItem;
+	{ This function will return a list of Analyses of points which are members of TerrGroup, }
+	{ along with the value of the moves. }
+	{ It will return each point of the disputed group. }
+	{ These moves must be tested for safety, but not legality, before being made. }
+	var
+		PntsOfDisputedGroup : p2ListItem;
+		tempReturn : p2ListItem;
+		
+	procedure CreateAnalyses (g : p2Graph; Pnt : p2Node);
+		{ Create an analysis record for Pnt, a p2Node GOPoint. }
+		{ Push onto a list. }
+		var 
+			tempAnalysis : p2Analysis;
+		begin {CreateAnalyses}
+				tempAnalysis := NewAnalysis (g, 0, nil, nil,
+									Pnt, GroupsGraphLevel);
+				{$IFC TraceExtensions}
+				if TraceMakeMoves then
+					begin
+						write (' in CreateAnalysis, added analysis is ');
+						PrintAnalPointItem(tempAnalysis);
+						writeln;
+					end;
+				{$ENDC}
+				Push (@gH^.PointGraph, tempReturn, p2Node(tempAnalysis) );
+		end; {CreateAnalyses}
+		
+	begin {AttachingPlay}
+		tempReturn := nil;
+		
+		PntsOfDisputedGroup := GetPointsOfGroup (@gH^.PointGraph, DisputedGrp);
+		
+		PopEach (@gH^.PointGraph, PntsOfDisputedGroup, CreateAnalyses); 
+
+		EvaluateExtensions (gH, StonesGrp, DisputedGrp, tempReturn, false);
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				writeln('AttachingPlay is returning:  ');
+				PrintAnalPointList(tempReturn);
+				writeln;
+			end;
+		{$ENDC}
+		AttachingPlay := tempReturn
+	end; {AttachingPlay}
+
+
+
+
+function FindPointsNAway (gH : p2GOAbstHier; TerrGroup, StonesGrp : p2Node; 
+								N : integer; GetTerr : boolean):p2ListItem;
+	{ This function will return a list of Analyses of points which are members of TerrGroup, }
+	{ along with the value of the moves. }
+	{ It will return as few bad moves as possible. }
+	var
+		PntsOfTerrGroup, ContactPoints, EdgeOfStonesGrp, tempReturn : p2ListItem;
+		FarthestDistance : integer;
+		FarthestPnt : p2Node;  {GOPoint.}
+		tempAnalysis : p2Analysis;
+			{ PntsOfTerrGroup = p2Node pntrs at POINTS of TerrGroup. }
+			{ ContactPoints = paired adjacent points. }
+			{ EdgeOfStonesGrp = p2Node pntrs at POINTS of StonesGrp adjacent to TerrGroup. }
+			{ tempAnalysis is used only in getting a new analysis record. }
+
+		procedure isNAway (g : p2Graph; Pnt : p2Node);
+			{ Answers the question of the shortest distance from a point of }
+			{ EdgeOfStonesGrp to Pnt.  If this is approximately N, then add it to }
+			{ tempReturn.  If it is greater than FarthestDistance, then replace }
+			{ FarthestPnt with Pnt. }
+			var 
+				MinToTerrGroup, DistanceToPnt : integer;
+				PntOfG2 : p2ListItem;
+				tempValue : integer;
+			begin {isNAway}
+				MinToTerrGroup := 100;  {Bigger than any possible.}
+				PntOfG2 := EdgeOfStonesGrp;
+				while PntOfG2 <> nil do 
+					begin
+						DistanceToPnt := Distance (Pnt, PntOfG2^.ListItem);
+						if MinToTerrGroup > DistanceToPnt then
+							MinToTerrGroup := DistanceToPnt;
+						PntOfG2 := PntOfG2^.NextListItem;
+					end;
+				if abs (MinToTerrGroup - N) <= 1 then
+					{This is approximately N.}
+					begin
+						tempAnalysis := NewAnalysis (g, 0, nil, nil, Pnt, GroupsGraphLevel);
+						{$IFC TraceExtensions}
+						if TraceMakeMoves then
+							begin
+								write (' in isNAway, added analysis is ');
+								PrintAnalPointItem(tempAnalysis);
+								writeln;
+							end;
+						{$ENDC}
+						Push (g, tempReturn, p2Node(tempAnalysis) );
+					end
+				else if MinToTerrGroup > FarthestDistance then
+					begin
+						FarthestDistance := MinToTerrGroup;
+						FarthestPnt := Pnt;
+					end;
+				{$IFC TraceExtensions}
+				if TraceDistance then
+					begin
+						writeln('Shortest Distance is ', MinToTerrGroup:1);
+					end;
+				{$ENDC}
+			end; {isNAway}
+			
+	begin {FindPointsNAway}
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				write('Entering FindPointsNAway: Representative of Grp 1 =  ');
+				PrintGroupItem(TerrGroup);
+				writeln;
+				write('Representative of Grp 2 = ');
+				PrintGroupItem(StonesGrp);
+				writeln;
+				writeln('Optimal Distance is : ', N : 1);
+			end;
+		{$ENDC}
+		tempReturn := nil;
+		PntsOfTerrGroup := nil;
+		ContactPoints := nil;
+		EdgeOfStonesGrp := nil;
+		FarthestDistance := 0;
+		FarthestPnt := nil;
+		
+		PntsOfTerrGroup := GetPointsOfGroup (@gH^.PointGraph, TerrGroup);
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				write('Points of Group 1 are ');
+				PrintPointList(PntsOfTerrGroup);
+				writeln;
+			end;
+		{$ENDC}
+		ContactPoints := FindGroupContactPoints (gH, StonesGrp, TerrGroup);
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				write('Returned Contact Point List in FindPointsNAway is ');
+				PrintPointList(ContactPoints);
+				writeln;
+			end;
+		{$ENDC}
+		with gH^ do
+			EdgeOfStonesGrp := StonesAtEdge (@DocumentInfo, @PointGraph, StonesGrp, 
+				ContactPoints); 
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				write('Edge of group 2 is  ');
+				PrintPointList(EdgeOfStonesGrp);
+				writeln;
+			end;
+		{$ENDC}
+		PopEach(@gH^.PointGraph, PntsOfTerrGroup, isNAway);
+		if (tempReturn = nil) and (FarthestPnt <> nil) then
+			begin
+				{$IFC TraceExtensions}
+				if TraceMakeMoves then
+					begin
+						write('Returning FarthestPoint. ');
+						PrintPointItem(p2Node (FarthestPnt) );
+						writeln;
+					end;
+				{$ENDC}
+				tempAnalysis := NewAnalysis (@gH^.PointGraph, 0, nil, nil,
+									p2Node(FarthestPnt), GroupsGraphLevel);
+				{$IFC TraceExtensions}
+				if TraceMakeMoves then
+					begin
+						write (' in FindPointsNAway, added analysis is ');
+						PrintAnalPointItem(tempAnalysis);
+					end;
+				{$ENDC}
+				Push (@gH^.PointGraph, tempReturn, p2Node(tempAnalysis) );
+			end;
+
+		EvaluateExtensions (gH,StonesGrp, TerrGroup, tempReturn, GetTerr);
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				writeln('FindPointsNAway is returning:  ');
+				PrintAnalPointList(tempReturn);
+				writeln;
+			end;
+		{$ENDC}
+		FindPointsNAway := tempReturn
+	end; {FindPointsNAway}
+	
+function MaxOf (g : p2Graph; List : p2ListItem):p2Analysis;
+	{ MaxOf takes a list of p2Analysis coerced into p2Nodes. }
+	{ It returns the one with the highest "result" field and }
+	{ disposes of all others. }
+	var
+		tempAnalysis : p2Analysis;
+		MaxAnalysis : p2Analysis;
+	begin
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				writeln('Entering MaxOf ');
+			end;
+		{$ENDC}
+		MaxAnalysis := nil;
+		while List <> nil do
+			begin
+				if MaxAnalysis = nil then
+					MaxAnalysis := p2Analysis ( Pop (g, List) )
+				else
+					begin
+						tempAnalysis := p2Analysis ( Pop (g, List) );
+						if tempAnalysis^.result > MaxAnalysis^.result then
+							MaxAnalysis := tempAnalysis
+						else
+							begin
+								{$IFC TraceExtensions or TraceReturnAnalysis}
+								if TraceMakeMoves then
+									begin
+										write('Calling ReturnAnalysis from MaxOf with target ');
+										PrintPointItem(tempAnalysis^.target);
+										writeln;
+									end;
+								{$ENDC}
+								ReturnAnalysis(g, tempAnalysis);
+							end; {if tempAnalysis^.result = MaxAnalysis^.result }
+					end; { if MaxAnalysis <> nil }
+				
+			end; {while}
+		if MaxAnalysis = nil then
+			MaxOf := nil
+		else if MaxAnalysis^.result < 0 then
+			begin
+				{ xxx Return the result with value 0? }
+				{$IFC TraceExtensions or TraceReturnAnalysis}
+				if TraceMakeMoves then
+					begin
+						write('Calling ReturnAnalysis -- MaxValue < 0.  target = ');
+						PrintPointItem(MaxAnalysis^.target);
+						writeln;
+					end;
+				{$ENDC}
+				ReturnAnalysis (g, MaxAnalysis);
+				MaxOf := nil
+			end
+		else if MaxAnalysis^.result > MaxMoveValues then
+			begin
+				MaxAnalysis^.result := MaxMoveValues;
+				MaxOf := MaxAnalysis
+			end
+		else
+			MaxOf := MaxAnalysis;
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				if MaxAnalysis <> nil then 
+					begin
+						write(' : returning ');
+						PrintPointItem (MaxAnalysis^.target);
+						writeln(' with value ',MaxAnalysis^.result : 1);
+					end
+				else
+					writeln(' : returning nil.');
+			end;
+		{$ENDC}
+
+	end; {MaxOf}
+	
+function ExtendOff (gH : p2GoAbstHier; Grp : p2Node; GetTerr : boolean) : p2Analysis;
+{ This function will return the best extension that it can find }
+{ from the group Grp. }
+{ It searches in a purely static fashion. }
+{ GetTerr is true if the purpose of the extension is to grab open territory. }
+
+	var tempReturn : p2ListItem;
+		GrpStrength : integer;
+		ExtendLength : integer;
+		tempAnal : p2Analysis;
+		
+	procedure OneTerr ( Grp2 : p2Node );
+		var
+			ColorOf : BlockHighState;
+		begin { OneTerr }
+		{$IFC TraceExtensions}
+			if TraceMakeMoves then
+				begin
+					write('Entering OneTerr on grp at ');
+					PrintGroupItem(Grp);
+					writeln;
+				end;
+		{$ENDC}
+			ColorOf.BlockStateInt := Grp2^.LowState;
+			if ColorOf.BlockTyp >= FirstTerrBlock then  
+				{It is territory, we can extend into it. }
+				begin
+					JoinStacks (tempReturn, FindPointsNAway (gH, Grp2, Grp, ExtendLength, GetTerr) );
+					{$IFC TraceExtensions}
+					if TraceMakeMoves then
+						writeln('Returning from FindPointsNAway');
+					{$ENDC}
+				end
+			else if (ColorOf.BlockTyp = DisputedGroup) and (not GetTerr) then
+				{Really a string of joint liberties.}
+				begin
+					JoinStacks (tempReturn, AttachingPlay (gH, Grp2, Grp) );
+					{$IFC TraceExtensions}
+					if TraceMakeMoves then
+						writeln('Returning from AttachingPlay');
+					{$ENDC}
+				end;
+		end; { OneTerr }
+		
+	begin {ExtendOff}
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				write('Entering ExtendOff on grp at ');
+				PrintGroupItem(Grp);
+				writeln;
+			end;
+		{$ENDC}
+		GrpStrength := StrengthOf (Grp);
+		if gH^.DocumentInfo.dBoardSize < 13 then
+			ExtendLength := GrpStrength
+		else
+			ExtendLength := GrpStrength + 2;  {??? xxx}
+		{Very Weak group -- base is extend 1. Very Strong -- extend 5.  [too long?] }
+		
+		tempReturn := nil;
+		EachAdjNode (Grp, OneTerr);
+		{$IFC TraceExtensions or TraceReturnAnalysis}
+		if TraceMakeMoves then
+			begin
+				write('ExtendOff can return any of');
+				PrintAnalPointList(tempReturn);
+				writeln;
+			end;
+		{$ENDC}
+		tempAnal := MaxOf (@gH^.PointGraph, tempReturn);
+		{$IFC TraceExtensions}
+		if TraceMakeMoves then
+			begin
+				write('ExtendOff is returning ');
+				PrintAnalPointItem(tempAnal);
+				writeln;
+			end;
+		{$ENDC}
+		ExtendOff := tempAnal;
+	end; {ExtendOff}

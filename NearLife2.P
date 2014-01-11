@@ -1,0 +1,1655 @@
+{$S NearLife }
+
+{  Efficiency Notes ::
+		
+	More work on MakeVital :
+		More processing gives fewer tries.
+		Play stones either :
+			Adjacent only to empty (Make Healthy case)
+			Adjacent to both friends and enemies.
+}
+
+
+CONST
+{$IFC TraceMakeLife}
+  TraceGroup = false;
+	TraceNearLife = true;
+	OutputGroup = false;
+{$ELSEC}
+  TraceGroup = false;
+	TraceNearLife = false;
+	OutputGroup = false;
+{$ENDC}
+	
+procedure PrintStringList (l : p2ListItem);
+var temp : p2ListItem;
+begin
+    temp := l;
+	while temp <> nil do begin
+	   PrintPointItem(temp^.ListItem^.Child);
+	   temp := temp^.NextListItem;
+	   if temp<> nil then write(' , ');
+	   end;
+end;
+
+procedure PrintBlockItem ( p: p2Node);
+var x,y : integer;
+begin
+   PrintPointItem(p^.child^.child);
+end;
+
+procedure PrintBlockList (l : p2ListItem);
+var temp : p2ListItem;
+begin
+    temp := l;
+	while temp <> nil do begin
+	   PrintBlockItem(temp^.ListItem);
+	   temp := temp^.NextListItem;
+	   if temp<> nil then write(' , ');
+	   end;
+end;
+
+
+(* *** Counts all the points in a group *** *)
+function NumBlkPoints (b: P2Node): integer;
+	{ Given a block, counts the number of Points in the block }
+	var n: integer;
+	
+	procedure CountStrPoints (s: p2Node);
+		begin
+			n := n + NumElements (s);
+		end; {CountStrPoints}
+		
+	begin {NumBlkPoints}
+		n := 0;
+		EachElement (b, CountStrPoints);
+		NumBlkPoints := n;
+	end; {NumBlkPoints}
+
+function CountPointsInList (BlkList : p2ListItem) : integer;
+	{ Count all the points in a LIST of blocks. }
+var
+	n : integer;
+begin
+	n := 0;
+	while BlkList <> nil do 
+		begin
+			n := n + NumBlkPoints (BlkList^.ListItem);
+			BlkList := BlkList^.NextListItem;
+		end;
+	CountPointsInList := n;
+end;
+
+{---------------------------------------------------
+Function DeleteCopies will return one copy of each 
+node that appears on the List at least once.
+-----------------------------------------------------}
+function   DeleteCopies (g : p2Graph; List : p2ListItem) : p2ListItem;
+	var tempList, tempReturn : p2ListItem;
+	begin
+		tempReturn := nil;
+		tempList := List;
+		while tempList <> nil do 
+			begin
+				if PushUnique (g, tempReturn, tempList^.ListItem) then 
+					{nothing to do};
+				tempList := tempList^.NextListItem;
+			end;
+		DeleteCopies := tempReturn;
+	end;
+
+{---------------------------------------------------
+Function PointsInBlkList returns a list of points in a 
+list of strings.
+-----------------------------------------------------}
+function PointsInBlkList (g: p2Graph; BlkList : p2ListItem) : p2ListItem;
+	var
+		tempList : p2ListItem;
+	
+	procedure AddPntsOfBlk (StrNode : p2Node);
+		procedure AddPntsOfStr (PntNode : p2Node);
+			begin
+				Push (g, tempList, PntNode);
+			end; {AddPntsOfStr}
+		begin {AddPntsOfBlk}
+			EachElement (StrNode, AddPntsOfStr);
+		end; {AddPntsOfBlk}
+	begin {PointsInBlkList}
+		tempList := nil;
+		while BlkList <> nil do 
+			begin
+				if TraceNearLife then
+					begin
+						write ('Adding the points of block');
+						PrintBlockItem (BlkList^.ListItem);
+						writeln;
+					end;
+				EachElement (BlkList^.ListItem, AddPntsOfBlk);
+				BlkList := BlkList^.NextListItem;
+			end;
+		PointsInBlkList := tempList;
+	end; {PointsInBlkList}
+
+{---------------------------------------------------
+Function Intersect returns the intersection of the
+two lists
+-----------------------------------------------------}
+function Intersect (g: p2Graph; L1, L2 : p2ListItem) : p2ListItem;
+var
+	temp1, temp2, tempReturn : p2ListItem;
+begin
+	tempReturn := nil;
+	temp1 := L1;
+	while temp1 <> nil do
+		begin
+			temp2 := L2;
+			while temp2 <> nil do 
+				begin
+					if temp1^.ListItem = temp2^.ListItem then
+						Push(g, tempReturn, temp1^.ListItem);
+					temp2 := temp2^.NextListItem;
+				end;
+				
+			temp1 := temp1^.NextListItem;
+		end;
+	Intersect := tempReturn;
+end;
+
+{-------------------------------------------------------
+Member returns true iff p is to be found on List.
+--------------------------------------------------------}
+function Member(p : p2Node; List : p2ListItem) : boolean;
+var
+	tempList : p2ListItem;
+	tempReturn : boolean;
+begin
+	tempList := List;
+	tempReturn := false;
+	while (not tempReturn) and (not (tempList = nil) ) do
+		begin
+			tempReturn := (tempList^.ListItem = p);
+			tempList := tempList^.NextListItem;
+		end;
+	Member := tempReturn;
+end;   {Member}
+
+{----------------------------------------------------------
+This function will change a list of nodes into a list of the
+children of those nodes.
+------------------------------------------------------------}
+procedure LowerListRef(iList : p2ListItem);
+var
+	tempList : p2ListItem;
+begin
+	tempList := iList;
+	while tempList <> nil do 
+		begin
+			tempList^.ListItem := tempList^.ListItem^.Child;
+			tempList := tempList^.NextListItem;
+		end;
+end;
+
+
+{--------------------------------------------------------
+RemoveIntersection will remove any nodes on List2 from List1.
+---------------------------------------------------------}
+procedure RemoveIntersection(g : p2Graph; var List1 : p2ListItem; List2 : p2ListItem);
+var 	temp1,temp2 : p2ListItem;
+		RemovedNodes : p2ListItem;
+		Found : boolean;
+		anItem : p2ListItem;
+		
+begin
+	temp1 := List1;
+	List1 := nil;
+	
+	while temp1 <> nil do 
+		begin
+			temp2 := List2;
+			Found := false;
+			while (temp2 <> nil) and (not Found) do
+				if temp1^.ListItem = temp2^.ListItem then
+					Found := true
+				else
+					temp2 := temp2^.NextListItem;
+					
+			anItem := temp1;
+			temp1 := temp1^.NextListItem;
+			if Found then 
+				begin
+					anItem^.NextListItem := RemovedNodes;  {If Found then delete this node.}
+					RemovedNodes := anItem;
+				end
+			else
+				begin
+					anItem^.NextListItem := List1;  {If not Found then return node to List1.}
+					List1 := anItem;
+				end;
+		end;  {while temp1 <> nil}
+end;  {RemoveIntersection.}
+					
+{------------------------------------------------------------
+AddPointsOfBlock(g, EyePointList, HealthyEyes);
+Will add all the Points which are members of the Block
+to the PointList.
+-------------------------------------------------------------}
+procedure AddPointsOfBlock(g : p2Graph; var PointList : p2ListItem; BlockList : p2ListItem);
+var
+	tempList : p2ListItem;
+	
+	procedure AddPointsOfString(s : p2Node);
+	
+		procedure AddPoints(p : p2Node);
+		begin
+			Push(g, PointList, p);
+		end;
+		
+	begin
+		EachElement(s, AddPoints);
+	end;
+begin
+	tempList := BlockList;
+	while tempList <> nil do
+		begin
+			EachElement(tempList^.ListItem, AddPointsOfString);
+			tempList := tempList^.NextListItem;
+		end;
+end;			
+
+
+
+{These functions are designed to work at the Block level of the graph,
+without referring to anything above.}
+
+{A Potentially Safe Block/Eye will be recorded in two places:
+ on a list (PotentialSafe) that has both Eyes and Blocks,
+ and by the color of the node in the Block Graph (PotentialEye, PotentialSafe) }
+{Non-Potentially Safe Eyes and Strings are recorded on UnHealthyEyes and Strings respectively.}
+
+procedure GetPotentialList(gH:p2GoAbstHier; Grp:p2Node; BlockColor : TStringType;  
+										var List, UnHealthyEyes, UnVitalEyes, Strings : p2ListItem);
+var
+   LowSt : StringHighState;
+	{----------------------------------------------------------------
+	function HealthyArea returns true iff B is a healthy area for all blocks surrounding it.
+	 B must fullfill three requirements:
+	 (1)  B must be an open area, possibly containing dead enemy stones.
+	 (2) B must be completely surrounded by blocks of BlockColor.
+	 (3) Each point in B must be adjacent to the same blocks.
+	----------------------------------------------------------------}
+	 function HealthyArea(B : p2Node): boolean;
+	 var NumBlocks : integer;
+	     AllAdj : boolean;
+		  Surrounded : boolean;
+	 
+		  procedure BlocksAroundLibBlock(adjBlock : p2Node);
+		  var LowState : StringHighState;
+		  
+		  	procedure AdjToEnemy(AdjStr : p2Node);
+			var HighState : StringHighState;
+			    JointLib : boolean;
+				
+		  		procedure AdjToFriend(AdjStr2 : p2Node);
+				var HighState : StringHighState;
+				begin
+					HighState.StrStateInt := AdjStr2^.HighState;
+					if HighState.StrTyp = BlockColor then
+						JointLib := true;
+				end;{AdjToFriend}
+				
+			begin  {AdjToEnemy}
+				HighState.StrStateInt := AdjStr^.HighState;
+				if HighState.StrTyp <> BlockColor then
+					begin
+						JointLib := false;
+						EachAdjNode(AdjStr, AdjToFriend);
+						if not JointLib then
+							Surrounded := false;
+					end;
+			end;  {AdjToEnemy}
+						
+		  begin {BlocksAroundLibBlock}
+			  LowState.StrStateInt := adjBlock^.LowState;
+			  if LowState.StrTyp <> BlockColor then 
+			  	begin
+					if TraceGroup then
+						begin
+							write('A non-BlockColor block has been found at point ');
+							PrintBlockItem(adjBlock);
+							writeln;
+						end;
+					Surrounded := false;
+				end
+			  else
+					NumBlocks := NumBlocks + 1;
+		  end; {BlocksAroundLibBlock}
+		  
+		  procedure AdjToAll(Member : p2Node);
+		  var NumStrings : integer;
+		     
+			  {------------------------------------------
+			  Blocks Around is called on each Liberty String
+			  in the Empty Region, to determine if it is
+			  adjacent to all blocks adjacent to the empty region.
+			  (That is, it works at the string level.)
+			  --------------------------------------------}			  
+			  procedure BlocksAround(MemberStr : p2Node);
+			  var LowState : StringHighState;
+			  begin
+				  LowState.StrStateInt := MemberStr^.HighState;
+				  if LowState.StrTyp = BlockColor then   
+						NumStrings := NumStrings + 1;
+			  end;
+			  
+		  begin
+			  NumStrings := 0;
+			  EachAdjNode(Member, BlocksAround);
+			  if NumStrings <> NumBlocks then
+				  AllAdj := false;
+		  end;
+		  
+	 begin
+	    if TraceGroup then
+		 	begin
+				 write('Function Healthy Area called on block');
+				 PrintBlockItem(B);
+				 writeln;
+			end;
+
+		LowSt.StrStateInt := B^.LowState;
+		 if (BlkLibStr <= LowSt.StrTyp) and 
+		 	(LowSt.StrTyp <= WhtLibStr) then {if this is a block of Liberty strings}
+			 begin
+				 Surrounded := true;
+				 NumBlocks := 0;
+				 EachAdjNode(B, BlocksAroundLibBlock);
+					 if Surrounded then
+						 begin
+							 AllAdj := true;
+							 EachElement(B, AdjToAll);
+							 if AllAdj then
+							    begin
+								 HealthyArea := true;
+								 if TraceGroup then
+								    writeln('it is a healthy area.');
+								 end
+							 else
+							    begin
+									 if TraceGroup then
+										 writeln('each point is not adjacent to all blocks.');
+									 Push(@gH^.BlockGraph, UnHealthyEyes, B);
+									 HealthyArea := false
+								 end
+						 end
+					 else  {if not Surrounded}
+					    begin
+							 if TraceGroup then
+									writeln('it is not surrounded by BlockColor.');
+							 Push(@gH^.BlockGraph, UnVitalEyes, B);
+							 HealthyArea := false
+						 end
+			 end
+		 else
+		    begin
+			 if TraceGroup then
+					writeln('it is not an EmptyBlock.');
+			 HealthyArea := false;
+			 end;
+	 end;
+	 
+	 procedure PotentialBlock(B : p2Node {Block Node.} );
+	{This procedure is called on every element of a group.  If that element is potentially
+	a safe Block/Eye, it is pushed onto the PotentialSafe list [List in this procedure] }
+		var LowState : StringHighState;
+		begin
+			with gH^ do
+				begin
+					if TraceGroup then
+						begin
+							PrintBlockItem(B);
+							writeln(' is part of the group.');
+						end;
+					LowState.StrStateInt := B^.LowState;
+					if LowState.StrTyp = BlockColor then   {This would be a Safe Block}
+						if NumLiberties(B^.Child) > 1 then  {String NOT in atari}
+							begin
+								if TraceGroup then
+									writeln('   Block is not in atari--Potential Block.');
+								Push(@BlockGraph, List, B);
+							end
+						else
+							begin
+								Push(@BlockGraph, UnHealthyEyes, B);
+								if TraceGroup then
+									writeln('   Block is in atari--not Potential Block.');
+							end
+					else if HealthyArea(B) then
+						begin
+								Push(@BlockGraph, List, B);
+						end
+				end;
+		end;
+	 
+begin
+	
+	with gH^ do
+		EachElement(Grp, PotentialBlock);
+		(*
+		BreadFirstSearch(@DocumentInfo, @BlockGraph, B, PotentialBlock, List);
+		*)
+end;
+ 
+
+procedure ColorOneBlock(B : p2Node; Color : boolean);
+begin
+   B^.Marked := Color;
+	if TraceGroup then
+		if not Color then
+			begin
+				write('Coloring block at ');
+				PrintBlockItem(B);
+				writeln(' unsafe.');
+			end;
+end;
+
+
+procedure ColorAllBlocks(list : p2ListItem; Color : boolean);
+var temp : p2ListItem;
+begin
+    temp := list;
+	 while temp <> nil do 
+	    begin
+ 			temp^.ListItem^.Marked := Color;
+			temp := temp^.NextListItem;
+	    end;
+end;
+
+
+
+procedure FindSafety(gH:p2GoAbstHier; Grp: p2Node{Group to be checked}; BlockColor : TStringType;
+			var HealthyEyes, UnHealthyEyes, UnVitalEyes, TrueEyes, Strings, SafeStrings : p2ListItem);
+var
+    NumAdjEyes : integer;
+	SafeBlocksAround : boolean;
+	temp : p2ListItem;
+	aBlock : p2Node;
+	done : boolean;
+	PotentialSafe : p2ListItem;
+	LowSt : StringHighState;
+
+	  {xxx At some point, this procedure should color this node as Safe Block or Eye.
+	  For now, it just returns all outstanding Marked fields to False.}
+	  procedure ColorSafe(g : p2Graph; p : p2Node);
+	  var 
+	  		LowState : StringHighState;
+	  begin
+	  	  LowState.StrStateInt := p^.LowState;
+		if (BlkLibStr <= LowState.StrTyp) and 
+		 	(LowState.StrTyp <= WhtLibStr) then	  
+		  	{p is a true Eye.  Add to list.}
+				Push(@gH^.BlockGraph, TrueEyes, p)
+		  else
+		  	{p is a Safe String.  Add to list.}
+				Push(@gH^.BlockGraph, SafeStrings, p);
+				
+		  p^.Marked := false;
+		  if OutputGroup then
+			  begin
+				  write('Safe block at ');
+				  PrintBlockItem(p);
+				  writeln;
+			  end;
+	  end;
+	 
+	 procedure CountAdjEyes(adjBlock:p2Node);
+	 var 
+	 		LowState : StringHighState;
+	 begin
+	    LowState.StrStateInt := adjBlock^.LowState;
+		if (BlkLibStr <= LowState.StrTyp) and 
+		 	(LowState.StrTyp <= WhtLibStr) and	  
+		 	 adjBlock^.Marked then   
+		 {adjBlock is a potential Eye.}
+		    begin
+			  NumAdjEyes := NumAdjEyes + 1;	
+			  if TraceGroup then
+			     begin
+				     PrintBlockItem(adjBlock);
+				     writeln(' is a Potential Eye of the current node.');
+				  end;
+			 end;
+	 end; 
+	 
+	procedure TestAdjBlocks(adjBlock : p2Node);
+	var LowState : StringHighState;
+	begin
+		LowState.StrStateInt := adjBlock^.LowState;
+		if (LowState.StrTyp = BlockColor) and not adjBlock^.Marked  then
+			{if this eye is adjacent to a non-Potentially Safe friendly block then}
+			begin
+				SafeBlocksAround := false;
+				if TraceGroup then
+					begin
+						PrintBlockItem(adjBlock);
+						write(' is not a Potential Safe Block ');
+						writeln('and is adjacent to the current eye.');
+					end;
+			end
+		else
+			if TraceGroup then
+				begin
+					PrintBlockItem(adjBlock);
+					writeln(' is a Potential Safe Block adjacent to the current eye.');
+					write('The Block Color is ');
+					if BlockColor = BlackStonesStr then
+						writeln('BlackStonesStr')
+					else if BlockColor =  WhiteStonesStr then 
+						writeln('WhiteStonesStr')
+					else writeln('Neither BlackStonesStr or WhiteStonesStr');
+					write('The color of the adjacent block is ');
+					if LowState.StrTyp = BlackStonesStr then
+						writeln('BlackStonesStr')
+					else if LowState.StrTyp =  WhiteStonesStr then 
+						writeln('WhiteStonesStr')
+					else writeln('Neither BlackStonesStr or WhiteStonesStr');
+					if adjBlock^.Marked then writeln ('adjBlock^.Marked = true')
+					else writeln('adjBlock^.Marked = false');
+				end;
+	end;
+	 
+begin
+	if TraceGroup then
+		begin
+  			write('Entering FindSafety on block at point ');
+			PrintBlockItem(Grp^.Child);
+			writeln;
+		end;
+			
+   with gH^ do 
+	   begin
+			PotentialSafe := nil;
+			{Get Potential List will push UnHealthyEyes, and Atari strings onto Strings.
+			  All others are Potentially Safe.}
+			GetPotentialList(gH, Grp, BlockColor, PotentialSafe, UnHealthyEyes, UnVitalEyes, Strings);
+			{xxxColor everything in PotentialSafe as a Potential Block or Potential Eye}
+			{Do this by setting the Mark boolean to true.}
+			ColorAllBlocks(PotentialSafe, true);
+			
+			done := false;   {enter the loop for the first time.}
+			while not done do 
+			begin
+				if TraceGroup then
+					begin
+						write('The potentially safe list is: ');
+						PrintBlockList(PotentialSafe);
+						writeln;
+					end;
+				temp := PotentialSafe;
+				done := true;  {negative test on done -- we are done if nothing changes.}
+				while temp <> nil do 
+				  begin
+					  aBlock := temp^.ListItem;  {Note: aBlock must be Potential Safe Block/Eye.}
+					  temp := temp^.NextListItem;
+				  	  if TraceGroup then
+					  		begin
+								 write('     Entering while temp<>nil loop.');
+								 write(' Considering ');
+								 PrintBlockItem(aBlock);
+								 writeln;
+							end;
+					  LowSt.StrStateInt := aBlock^.LowState;
+					  if LowSt.StrTyp = BlockColor then   {This would be a Safe Block}
+						  begin 
+						 {This is a safe block if it is adjacent to two potential eyes.}
+							  NumAdjEyes := 0;
+							  EachAdjNode(aBlock, CountAdjEyes);
+							  if TraceGroup then
+							  		writeln('This block has ',NumAdjEyes:1,' Eyes.');
+							  if NumAdjEyes < 2 then  {This Block is not safe.}
+								  begin
+									  ColorOneBlock(aBlock,false);
+									  {Changed Marked field back to false.}
+										done := false; 
+										{If anything changes color then we aren't done.}
+										Push(@BlockGraph, Strings, aBlock);
+										{Add to (UnSafe) Strings list.}
+										Delete(@BlockGraph, aBlock, PotentialSafe);  
+										{Get off of Potential Safe list.}
+								  end;
+						  end
+					  else   
+					  {This would be an Eye}
+							begin
+								if TraceGroup then
+						     		writeln('LowSt.StrTyp <> BlockColor');
+							{This is an eye if it is surrounded by safe blocks. }
+								SafeBlocksAround := true;
+								EachAdjNode(aBlock, TestAdjBlocks);
+								if not SafeBlocksAround then  {This is not an Eye.}
+									begin
+									  ColorOneBlock(aBlock,false);
+									  {Changed Marked field back to false.}
+										done := false; 
+										{If anything changes color then we aren't done.}
+										Push(@BlockGraph, HealthyEyes, aBlock);
+										{Add to Healthy (but UnSafe) Eye list.}
+										Delete(@BlockGraph, aBlock, PotentialSafe);  
+										{Get off of Potential Safe list.}
+									end; {if not SafeBlocksAround}
+							end; {if aBlock^.Color = PotentialEye}
+				  end;  {While temp<>nil}
+			end;     {while not done.}
+			if TraceGroup then
+				writeln('Done!  Exiting loop.');
+			PopEach(@BlockGraph, PotentialSafe, ColorSafe);
+			{xxx Remove everything from PotentialSafe and color Eye/SafeGroup.}
+		end;  {with gH^ do}
+end;
+
+
+{---------------------------------------------------
+Function ConnectTwo returns a list of p2GOPoints that will
+connect the STRINGS S1 and S2, or nil if none can be
+found.
+----------------------------------------------------}
+function ConnectTwo(g : p2Graph; S1, S2:p2Node):p2ListItem;
+var
+	tempReturn, S1Libs, S2Libs : p2ListItem;
+	
+	procedure ListLibs(adjNode : p2Node);
+	{adjNode points to the String Graph.  If this is a liberty node,
+	push the p2GoPoint associated onto tempReturn.}
+		var s: PointHighState;
+		begin
+		   s.PtStateInt := AdjNode^.LowState;
+		   if s.PtOcc >= UnOcc then
+		      {Point is unoccupied.  Push to tempReturn.}
+				Push(g, tempReturn, adjNode^.Child);
+		end;
+
+begin
+	if S1 = S2 then 
+		ConnectTwo := nil
+	else
+		begin
+			tempReturn := nil;
+			EachAdjNode(S1, ListLibs);
+			S1Libs := tempReturn;
+			tempReturn := nil;
+			EachAdjNode(S2, ListLibs);
+			S2Libs := tempReturn;
+			tempReturn := nil;
+			
+			tempReturn := Intersect(g, S1Libs, S2Libs);
+			
+			if TraceNearLife then
+				begin
+					write('in ConnectTwo, the points to connect the Strings at');
+					PrintPointItem(S1^.Child);
+					PrintPointItem(S2^.Child);
+					writeln;
+					write('Are the points ');
+					PrintPointList(tempReturn);
+					writeln;
+				end;
+				
+			ReturnToAvailList(g, S1Libs);
+			ReturnToAvailList(g, S2Libs);
+			
+			ConnectTwo := tempReturn;
+		end;
+end;
+	
+{--------------------------------------------------
+function Connect will return all the p2GoPoints moves that
+would connect BLOCK B to a block on the List.
+----------------------------------------------------}
+function Connect(g : p2Graph; B : p2Node; List : p2ListItem) : p2ListItem;	
+var
+	tempList : p2ListItem;
+	tempReturn : p2ListItem;
+begin
+	tempReturn := nil;
+	tempList := List;
+	while tempList <> nil do
+		begin
+			JoinStacks(tempReturn, ConnectTwo(g, B^.Child, tempList^.ListItem^.Child) );
+			tempList := tempList^.NextListItem;
+		end;
+	Connect := tempReturn;
+end;
+
+{--------------------------------------------------
+Function ConnectOut will return a list of moves that 
+Connect B to a string in Strings without using
+Points on any Healthy or True Eye list.
+----------------------------------------------------}
+function ConnectOut(g : p2Graph; B : p2Node;  
+							Strings,HealthyEyes,UnHealthyEyes,TrueEyes : p2ListItem) : p2ListItem;
+var 
+	tempReturn, EyePointList : p2ListItem;
+begin
+	tempReturn := Connect(g, B, Strings);
+	EyePointList := nil;
+	
+	AddPointsOfBlock(g, EyePointList, HealthyEyes);
+	AddPointsOfBlock(g, EyePointList, UnHealthyEyes);
+	AddPointsOfBlock(g, EyePointList, TrueEyes);
+
+	RemoveIntersection(g, tempReturn, EyePointList);
+	
+	if TraceNearLife then
+		begin
+			write('The list of connecting points without intersection is');
+			PrintPointList(tempReturn);
+			writeln;
+		end;
+	
+	ConnectOut := tempReturn;
+end;
+
+{--------------------------------------------------
+Function ConnectAll will return a list of moves that 
+Connect any two blocks on List.
+----------------------------------------------------}
+Function ConnectAll (g : p2Graph; List : p2ListItem) : p2ListItem;	
+	var
+		Blck : p2Node;
+		tempList, tempReturn : p2ListItem;
+	begin
+		tempList := List;
+		tempReturn := nil;
+		while tempList <> nil do
+			begin
+				Blck := tempList^.ListItem;
+				tempList := tempList^.NextListItem;
+				JoinStacks(tempReturn, Connect (g, Blck, tempList) );
+			end;
+		ConnectAll := tempReturn;
+	end;
+	
+
+{--------------------------------------------------
+Function KillEnemies will return a list of moves that 
+Kill adjacent enemy strings in atari.
+----------------------------------------------------}
+function KillEnemies (g : p2Graph;  Grp : p2Node;  BlockColor : TStringType) : p2ListItem ;
+	var
+		tempList : p2ListItem;
+		
+	procedure FindEnemy (EnemyBlk : p2Node);
+		var LowS : StringHighState;
+				DameFound : integer;
+				EnemyDame : p2Node;
+		
+		procedure FindDame ( StringAdjToEnemy : p2Node);
+			var
+				adjHighS : StringHighState;
+			begin
+				adjHighS.StrStateInt := StringAdjToEnemy^.HighState;
+				if adjHighS.StrTyp <= WhtLibStr then 
+					{ This is a liberty. }
+					begin
+						DameFound := DameFound + 1;
+						EnemyDame := StringAdjToEnemy;
+					end;
+			end; {FindDame}
+			
+		begin {FindEnemy}
+			LowS.StrStateInt := EnemyBlk^.LowState;
+			if (LowS.StrTyp = BlackStonesStr) or (LowS.StrTyp = WhiteStonesStr) then
+				if LowS.StrTyp <> BlockColor then
+					{ This must be a block of the enemy. }
+					begin
+						if TraceNearLife then
+							begin
+								write (' Found an enemy block at ');
+								PrintBlockItem (EnemyBlk);
+								writeln;
+							end;
+						DameFound := 0; EnemyDame := nil;
+						EachAdjNode (EnemyBlk^.Child, FindDame);
+						if DameFound = 1 then
+							begin
+								Push (g, tempList, EnemyDame^.Child);
+								if TraceNearLife then
+									begin
+										write (' It had one dame at ');
+										PrintPointItem (EnemyDame^.Child);
+										writeln;
+									end;
+							end;
+							{ Note : Child of a Liberty String is a point. }
+					end;
+		end; {FindEnemy}
+		
+	procedure EachBlkOfGrp (BlkOfGrp : p2Node);
+		begin
+			EachAdjNode (BlkOfGrp, FindEnemy);
+		end; {EachBlkOfGrp}
+		
+	begin {KillEnemies}
+		tempList := nil;
+		EachElement (Grp, EachBlkOfGrp);
+		KillEnemies := tempList;
+	end; {KillEnemies}
+
+
+
+{---------------------------------------------------
+function CutEye returns a list of p2GoPoint moves that
+might cut B in half.
+B is a pointer to BlockLevel.
+List consists of :  Points adjacent to 2 Liberty nodes
+and 2 strings;
+Points adjacent to 2 (or more) Liberty Nodes and 1 String;
+Points adjacent to 2 (or more) Liberty Nodes and no strings.
+----------------------------------------------------}
+function CutEye(g : p2Graph; B : p2Node; StringColor : TOccStatus):p2ListItem;
+var
+	tempList : p2ListItem;
+    Points22, Points21, Points20 : p2ListItem;
+   
+	{--------------------------------------
+	S is the String node for the liberty.
+	---------------------------------------}
+	procedure EachLibertyPoint(S : p2Node);
+	var
+		NumStr, NumLib : integer;  {Number of adjacent Strings and Liberties.}
+	
+		{---------------------------------------
+		Called on the surrounding strings for each
+		Liberty string.
+		----------------------------------------}
+		procedure SurroundingPoints(S : p2Node);
+		var PtSt: PointHighState;
+		begin
+		   PtSt.PtStateInt := S^.LowState;
+		   { xxx review this? }
+		   if (PtSt.PtOcc >= UnOcc) or (PtSt.PtOcc <> StringColor) then
+		      {Point is UnOcc, LibertyString or Dead Enemy.  Add to NumLib.}
+				NumLib := NumLib + 1
+			else 
+				NumStr := NumStr + 1;
+		end;
+	begin  {EachLibertyPoint}
+		NumStr := 0;
+		NumLib := 0;
+		EachAdjNode(S, SurroundingPoints);
+		if NumLib >= 2 then
+			if NumStr >= 2 then
+				Push(g, Points22, S^.Child)
+			else if NumStr = 1 then
+				Push(g, Points21, S^.Child)
+			else
+				Push(g, Points20, S^.Child);
+	end;  {EachLibertyPoint}
+	
+begin {Procedure CutEye}
+	Points22 := nil;
+	Points21 := nil;
+	Points20 := nil;
+	EachElement(B, EachLibertyPoint);
+	if TraceNearLife then
+		begin
+			write(' The liberty points of block ');
+			PrintBlockItem(B);
+			writeln(' are ');
+			write(' Adjacent to 2 strings : ');
+			PrintPointList(Points22);
+			writeln;
+			write(' Adjacent to 1 strings : ');
+			PrintPointList(Points21);
+			writeln;
+			write(' Adjacent to 0 strings : ');
+			PrintPointList(Points20);
+			writeln;
+		end;
+			
+			
+	JoinStacks(Points22, Points21);
+	JoinStacks(Points22, Points20);
+	CutEye := Points22;
+	if TraceNearLife then 
+		begin
+			write('The points to cut the eye at ');
+			PrintBlockItem(B);
+			writeln;
+			write(' Are the points ');
+			PrintPointList(Points22);
+			writeln;
+		end;
+end;  {CutEye}
+
+{-----------------------------------------------
+This will return the probable cutpoints for 
+each eye on the list.
+------------------------------------------------}
+function CutEachEye(g : p2Graph; EyeList : p2ListItem; StringColor : TOccStatus) : p2ListItem;
+var
+	tempList : p2ListItem;
+	tempReturn : p2ListItem;
+begin
+	if TraceNearLife then
+		begin
+			writeln('Entering CutEachEye');
+			PrintBlockList(EyeList);
+			writeln;
+		end;
+		
+	tempReturn := nil;
+	tempList := EyeList;
+	while tempList <> nil do
+		begin
+			JoinStacks(tempReturn, CutEye(g, tempList^.ListItem,StringColor) );
+			tempList := tempList^.NextListItem;
+		end;
+	CutEachEye := tempReturn;
+end;
+
+function GetPointsOfBlock (g : p2Graph;  Blk : p2Node ) : p2ListItem;
+	{ Get the points of the block Blk.  Push them as p2Node onto }
+	{ the returned list. }
+	var
+		tempReturn : p2ListItem;
+	procedure forEachStr (Str : p2Node);
+		procedure forEachPnt (Pnt : p2Node);
+			begin {forEachPnt}
+				Push (g, tempReturn, Pnt);
+			end; {forEachPnt}
+		begin {forEachStr}
+			EachElement (Str, forEachPnt);
+		end; {forEachStr}
+	begin {GetPointsOfBlock}
+		tempReturn := nil;
+		EachElement (Blk, forEachStr);
+		GetPointsOfBlock := tempReturn;
+	end; {GetPointsOfBlock}
+	
+{--------------------------------------------------------------------------------
+B is a block of BlkLibStr or WhtLibStr strings that is not completely surrounded by 
+BlockColor strings.  This function returns a list of points that might
+make it so.
+
+It can only be adjacent to the other color of lib strings, a joint lib string, a BlockColor string,
+or to a territory string.
+
+Note : there is no way to turn a joint lib point into an eye.
+
+we will play onto :
+	a point of the string that is adjacent to the outside;
+	a point of an adjacent Empty string;
+	an adjacent SoleLiberty.
+For each adjacent node, suggest a good move.
+---------------------------------------------------------------------------------}
+function MakeVital(gH : p2GOAbstHier; B : p2Node; BlockColor : TStringType):p2ListItem;
+	var 
+		PointsToReturn : p2ListItem;	{list of p2GoPoint moves.}
+		EnemyLibStr : TStringType;
+		adjPointPairs : p2ListItem;
+									
+	function FindContactPoints (Blk1, Blk2 : p2Node) : p2ListItem;
+		{ Blk1 and Blk2 are adjacent BLOCKS of liberty strings. }
+		{ adjPoints is a list of p2GOPoints.  Points are placed }
+		{ onto adjPoints in pairs; the first is a point of Blk1, and the second is a point of }
+		{ Blk2 which is adjacent to the first.}
+		{ Note that this does more work if Blk1 has more points to it that Blk2 }
+		var
+			B1PointsList, adjPoints : p2ListItem;
+		procedure FindAdjPoint (g : p2Graph; B1Point : p2Node);
+			{ B1Point is a point of Blk1. }
+			{ We want to find if it is adjacent to a point of Blk2, and if so, }
+			{ which point. }
+			procedure testAdjPoint (pDoc : p2DocInfo; possB2Point : p2GOPoint );
+				{ We test to see if possB2Point is a point of Blk2, and if so, }
+				{ we push it and B1Point onto adjPoints of FindContactPoints }
+				begin
+					if TraceNearLife then
+						begin
+							write('Entering testAdjPoint  ');
+							PrintPointItem( p2Node (possB2Point) );
+							writeln;
+						end;
+					if possB2Point^.PtNode^.Parent = Blk2 then
+						with gH^ do 
+							begin
+								if TraceNearLife then
+									begin
+										PrintPointItem( p2Node (possB2Point) );
+										write(' and ');
+										PrintPointItem(B1Point);
+										write(' are adjacent.');
+										writeln;
+									end;
+								Push (@BlockGraph, adjPoints, p2Node (possB2Point) );
+								Push (@BlockGraph, adjPoints, B1Point);
+								if TraceNearLife then
+									begin
+										write('AdjPoints = ');
+										PrintPointList(adjPoints);
+										writeln;
+									end;
+							end;
+				end;
+			begin {FindAdjPoint}
+				if TraceNearLife then
+					begin
+						write('Entering FindAdjPoint: ');
+						PrintPointItem(B1Point);
+						writeln;
+					end;
+				EachAdjPoint (@gH^.DocumentInfo, p2GoPoint (B1Point), testAdjPoint);
+			end; {FindAdjPoint}
+		begin {FindContactPoints}
+			adjPoints := nil;
+			if TraceNearLife then
+				begin
+					write('Entering FindContactPoints : find points between ');
+					PrintBlockItem(Blk1);
+					write (' and ');
+					PrintBlockItem(Blk2);
+					writeln;
+				end;
+			B1PointsList := GetPointsOfBlock (@gH^.BlockGraph, Blk1);
+			if TraceNearLife then
+				begin
+					write('Points of first block are: ');
+					PrintPointList(B1PointsList);
+					writeln;
+				end;
+			PopEach (@gH^.BlockGraph, B1PointsList, FindAdjPoint);
+			FindContactPoints := adjPoints;
+		end; {FindContactPoints}
+		
+	{for each block adjacent to B, recommend moves that might seal B off.}
+	procedure SealOffAdj (adjToBlock : p2Node);
+		var LowS : StringHighState;
+		begin
+			LowS.StrStateInt := adjToBlock^.LowState;
+			if TraceNearLife then
+				begin
+					write('Entering SealOffAdj on the ');
+					case LowS.StrTyp of
+						BlackStonesStr : write ('BlackStonesStr');
+						WhiteStonesStr : write ('WhiteStonesStr');
+						BlkLibStr : write ('BlkLibStr');
+						JntLibStr : write ('JntLibStr');
+						WhtLibStr : write ('WhtLibStr');
+						CornerTerrStr,
+						EdgeTerrStr,
+						CornDevTerrStr,
+						CornInfTerrStr, 
+						EdgeDevTerrStr, 
+						CenterTerrStr:
+							write ('territory string');
+					end;  {cases}
+					write(' block at ');
+					PrintBlockItem(adjToBlock);
+					writeln;
+				end;
+			if LowS.StrTyp = BlockColor then
+				begin
+					{Nothing to be done.}
+					if TraceNearLife then
+						begin
+							write('LowS.StrTyp = BlockColor. Not adding anything.');
+							write(' PointsToReturn = ');
+							PrintPointList (PointsToReturn);
+							writeln;
+						end;
+				end
+			else if LowS.StrTyp =  EnemyLibStr then
+					begin
+						{ Add Edge points of B to PointsToReturn. }
+						adjPointPairs := FindContactPoints (B, adjToBlock);
+						AddEveryOtherPoint (@gH^.BlockGraph, adjPointPairs, PointsToReturn);
+						if TraceNearLife then
+							begin
+								write(' after adding every other point,  ');
+								write(' to PointsToReturn = ');
+								PrintPointList (PointsToReturn);
+								writeln;
+							end;
+					end
+			else 
+				if (LowS.StrTyp=JntLibStr) or (LowS.StrTyp>=FirstTerrStringType) then
+					begin
+						{ Add both interior and exterior points. }
+						adjPointPairs := FindContactPoints (B, adjToBlock);
+						if TraceNearLife then
+							begin
+								write(' Adding ');
+								PrintPointList (adjPointPairs);
+								write(' to PointsToReturn = ');
+								PrintPointList (PointsToReturn);
+								writeln;
+							end;
+						JoinStacks (PointsToReturn, adjPointPairs );
+						if TraceNearLife then
+							begin
+								write(' after addition, ');
+								write('  PointsToReturn = ');
+								PrintPointList (PointsToReturn);
+								writeln;
+							end;
+					end
+				else
+					begin
+					{$IFC qDebug}
+					writeln (' Problem in MakeVital.  Lib str block adj to impossible block.');
+					{$ENDC}
+					end;
+		end;
+		
+	begin {MakeVital}
+		if TraceNearLife then
+			begin
+				write('Entering Make Vital on the ');
+				if BlockColor = BlackStonesStr then
+					write ('BlackLib')
+				else
+					write ('WhiteLib');
+				write(' block at ');
+				PrintBlockItem(B);
+				writeln;
+			end;
+		if BlockColor = BlackStonesStr then
+			EnemyLibStr := WhtLibStr 
+		else if BlockColor = WhiteStonesStr then
+			EnemyLibStr := BlkLibStr
+		else 
+			begin
+			{$IFC qDebug}
+			writeln (' Problem in MakeVital;  Block Color is not Black or White. ');
+			{$ENDC}
+			end;
+		
+		PointsToReturn := nil;
+		
+		EachAdjNode (B, SealOffAdj);
+		
+		if TraceNearLife then
+			begin
+				write('Exiting Make Vital, returning ');
+				PrintPointList(PointsToReturn);
+				writeln;
+			end;
+		MakeVital := PointsToReturn;
+		
+	end; {MakeVital}
+
+
+function MakeListVital(gH : p2GoAbstHier; List : p2ListItem; BlockColor : TStringType) : p2ListItem;
+var
+	tempReturn, tempIn : p2ListItem;
+begin
+	if TraceNearLife then
+		writeln('Entering MakeListVital');
+	tempReturn := nil;
+	tempIn := List;
+	while tempIn <> nil do 
+		begin
+			JoinStacks(tempReturn, MakeVital(gH, tempIn^.ListItem, BlockColor) );
+			tempIn := tempIn^.NextListItem;
+		end;
+	MakeListVital := tempReturn;
+	if TraceNearLife then
+		writeln('Exiting MakeListVital');
+end;
+
+{This variable is global to all calls of FindWorking Move.
+ It is initialized in CreateLife1}
+ 
+
+{This procedure assumes that it is the Defender's turn to
+move.}
+{-------------------------------------------------------------
+FindWorkingMove takes as input a list of moves to try, and returns
+the move from the list that creates life.  If it need not be
+made, then Necessary is set to false, else Necessary is set to
+true.
+If no move is found, then Necessary should be set to true.
+Necessary is true if No move is found, or if exactly one move is found.
+--------------------------------------------------------------}
+
+function FindWorkingMove (gH : p2GOAbstHier; 
+		GrpPoint : p2GoPoint;
+		BlockColor : TStringType;
+		var AttemptedMoves, SuggestedMoves : p2ListItem;
+		var Necessary : boolean) : p2GOPoint;
+var
+	HealthyEyes, UnHealthyEyes, UnVitalEyes, 
+	TrueEyes, Strings, SafeStrings : p2ListItem;
+	done : boolean;
+	FoundOne, FoundTwo, NoAtariStr : boolean;
+	NextMove, WorkingMove : p2GoPoint;
+	atPt : Point;
+	LegalMove : integer;
+	tempMove : p2GoPoint;
+	AtariPoints, SafePoints: p2ListItem;
+	
+	procedure PushStonesOfStr (PntOfStrNode : p2Node);
+		begin
+			Push (@gH^.BlockGraph, AtariPoints, PntOfStrNode);
+		end;
+	
+	procedure PushAtariPoints (Blk : p2Node);
+		{ Add all stones in Blk to the list AtariPoints. }
+		{ If the Blk is a FriendlyStoneString in Atari. }
+		var
+			LowS : StringHighState;
+		begin
+			LowS.StrStateInt := Blk^.LowState;
+			if (LowS.StrTyp = BlockColor) then
+				if NumLiberties (Blk^.Child) = 1 then
+					{ Blk is in Atari.  Note : Only 1 StonesString per block. } 
+					EachElement (Blk^.Child, PushStonesOfStr);
+		end;
+						
+begin {FindWorkingMove}
+	with gH^, DocumentInfo do
+		begin
+			done := false;
+			FoundOne := false;
+			FoundTwo := false;
+			NoAtariStr := false;
+			Necessary := true;
+			HealthyEyes := nil;
+			UnHealthyEyes := nil;
+			UnVitalEyes := nil;
+			TrueEyes := nil;
+			Strings := nil;
+			SafeStrings := nil;
+			WorkingMove := nil;
+			SafePoints := nil;
+			
+			AtariPoints := nil;
+			EachElement (GrpPoint^.PtNode^.Parent^.Parent, PushAtariPoints);
+			if TraceNearLife then
+				begin
+					write ('The Points in Atari are ');
+					PrintPointList (AtariPoints);
+					writeln;
+				end;
+			
+			{Can the defender save by going first?}
+			while (SuggestedMoves <> nil) and (not done) do
+				begin
+					NextMove := p2GOPoint (Pop (@gH^.BlockGraph, SuggestedMoves));
+					if not(Member(p2Node (NextMove), AttemptedMoves)) then
+						begin
+							Push(@gH^.BlockGraph, AttemptedMoves, p2Node (NextMove));
+							if TraceNearLife then
+								begin
+									write('CreateLife makeing a move at ');
+									PrintPointItem(p2Node(NextMove));
+									writeln;
+								end;
+							
+							LegalMove := TryMakeMove(gH, atPt, false, NextMove, true, 
+								false {temporary});
+							if LegalMove = 0 then  {Move was legal}
+								begin
+									{Did that move make B safe?}
+									FindSafety(gH, GrpPoint^.PtNode^.Parent^.Parent, BlockColor,
+										HealthyEyes, UnHealthyEyes, UnVitalEyes, TrueEyes, Strings, 
+										SafeStrings);
+									if SafeStrings <> nil then
+										begin
+											if TraceNearLife then
+												writeln('B is safe.');
+												
+											if not FoundOne then 
+												begin
+													FoundOne := true;
+													WorkingMove := NextMove;
+												end
+											else if not FoundTwo then 
+													FoundTwo := true;
+													
+											if not NoAtariStr then
+												begin
+													SafePoints := PointsInBlkList(@gH^.BlockGraph, SafeStrings);
+													NoAtariStr := 
+														(Intersect (@gH^.BlockGraph, SafePoints, AtariPoints) = nil);
+													if TraceNearLife then
+														begin
+															write (' Safe Points are ');
+															PrintPointList (SafePoints);
+															writeln;
+														end;
+													ReturnToAvailList(@gH^.BlockGraph, SafePoints); 
+												end;
+												{ NoAtariStr is true if the none of the safe stones was in }
+												{ Atari before the saving play. }
+												
+											if FoundTwo and NoAtariStr then
+												done := true;
+										end;	{ If SafeStrings <> nil }
+										with gH^ do 
+											begin
+												ReturnToAvailList(@BlockGraph, HealthyEyes); 
+												ReturnToAvailList(@BlockGraph, UnHealthyEyes); 
+												ReturnToAvailList(@BlockGraph, UnVitalEyes); 
+												ReturnToAvailList(@BlockGraph, TrueEyes); 
+												ReturnToAvailList(@BlockGraph, SafeStrings); 
+												ReturnToAvailList(@BlockGraph, Strings); 
+											end;
+									UnMakeMove (gH);
+								end  {If NextMove was legal.}
+							
+						end;  {if not Member(NextMove, AttemptedMoves) }
+
+				end;  {while not done}
+
+			if not done then
+				Necessary := true
+			else
+				Necessary := false;
+				
+		end;  {with gH, DocumentInfo do}
+
+	FindWorkingMove := WorkingMove;
+	
+	if TraceNearLife then
+		begin
+			write('Find Working Move returning ');
+			PrintPointItem(p2Node(WorkingMove));
+			writeln;
+		end;
+
+
+end; {FindWorkingMove}
+			
+
+{----------------------------------------------------------------------------------------
+CreateLife will search for the single move that will give life to B, which is a block node.
+If B is already safe, or the move can be made, Safe := true.  (Later::Safe := true if the
+enemy cannot play NextMove first.)
+NextMove is a p2GoPoint that indicates the place to move to save B.
+If no such move can be found, Safe := false and NextMove := nil.
+
+xxx Necessary to add BlockColor to pass to MakeHealthy and MakeVital.
+
+CreateLife1 == first and simplest attempt.  Try each of a set of recommended moves until
+B is alive.  
+
+Later :  Incremental Safety calculation.  More estimation of increased safety for B.
+Later yet : More information about WHY a move is attempted?
+-----------------------------------------------------------------------------------------}
+
+procedure CreateLife1(gH : p2GOAbstHier; Grp : p2Node; var Safe : boolean; 
+						var NextMove : p2GoPoint);
+var
+	HealthyEyes, UnHealthyEyes, UnVitalEyes, TrueEyes, Strings, SafeStrings : p2ListItem;
+	{Lists of Block Pointers to various elements of the Group including B.}
+	SuggestedMoves, returnSuggestedMoves : p2ListItem;  {Will be a list of P2GoPoints.}
+	AttemptedMoves : p2ListItem;  {Will be the list of p2GoPoints where moves have been tested.}
+	g : p2Graph;  				  {will point to the Block Graph.  Makes things clearer.}
+	BlockColor : TStringType;
+	StringColor : TOccStatus;
+	LowSt : BlockHighState;
+	done : boolean;
+	BlackAttacker, tempWantGraphics, tempToPlay : boolean;
+	LegalMove : integer;
+	atPt : Point;
+	Necessary : boolean;
+	
+	procedure StoreNilAnalysisResult (Pnt : p2Node);
+		{Pnt points to one of the stones in Str.}
+		begin
+			p2GOPoint(Pnt)^.AnalysisResult := nil;
+		end; {StoreNilAnalysisResult}
+	
+	procedure DisposeAnal (g: p2Graph; Pt: p2Node);
+	{ Pt will be a coerced p2GOPoint. }
+	{ Temporary analysis was imposed on this point; }
+	{ Return that analysis. }
+	{ Note that g should be the Point Graph. }
+	begin
+		if Pt <> nil then
+			with p2GOPoint(Pt)^ do
+				if AnalysisResult <> nil then
+					begin
+						{$IFC TraceReturnAnalysis}
+						write('Calling ReturnAnalysis from DisposeAnal in NearLife, target= ');
+						with AnalysisResult^ do
+							PrintPointItem(target);
+						writeln;
+						{$ENDC}
+						ReturnAnalysis (g, AnalysisResult);
+						(*   THIS IS A BUG!!! Every POINT that should have analysis returned 
+							will have DisposeAnal called on it.
+						EachElement (PtNode, StoreNilAnalysisResult);
+						*)
+					end;
+	end; {DisposeAnal}
+	
+begin {CreateLife1}
+	if TraceNearLife then 
+		begin
+			write ('Entering CreateLife1 on group at ');
+			PrintBlockItem(Grp^.Child);
+			writeln;
+		end;
+	LowSt.BlockStateInt := Grp^.LowState;
+	case LowSt.BlockTyp of
+		BlackGroup : BlockColor := BlackStonesStr;
+		WhiteGroup : BlockColor := WhiteStonesStr;
+	end;
+	
+	if TraceNearLife then 
+		if 	BlockColor = BlackStonesStr then writeln('BlockColor = BlackStonesStr')
+		else if BlockColor = WhiteStonesStr then writeln('BlockColor = WhiteStonesStr');
+		
+	if BlockColor = BlackStonesStr then
+		StringColor := BlackOcc
+	else
+		StringColor := WhiteOcc;
+
+	HealthyEyes := nil;
+	UnHealthyEyes := nil;
+	UnVitalEyes := nil;
+	TrueEyes := nil;
+	SafeStrings := nil;
+	Strings := nil;
+	SuggestedMoves := nil;
+	AttemptedMoves := nil;
+	
+	NextMove := nil;  	{ always initialize, can't hurt? }
+	
+	g := @gH^.BlockGraph;
+
+	FindSafety(gH, Grp, BlockColor, HealthyEyes, UnHealthyEyes, UnVitalEyes, TrueEyes, 
+		Strings, SafeStrings);
+	
+	if TraceNearLife then 
+		begin
+			writeln ('StackSize of HealthyEyes is ', StackSize (HealthyEyes):1);
+			writeln ('StackSize of UnHealthyEyes is ', StackSize (UnHealthyEyes):1);
+			writeln ('# points in HealthyEyes is ', CountPointsInList (HealthyEyes):1);
+			writeln ('# points in UnHealthyEyes is ', CountPointsInList (UnHealthyEyes):1);
+			writeln ('# points in UnVitalEyes is ', CountPointsInList (UnVitalEyes):1);
+		end;
+
+	(*
+	{First test == is B Safe Already?}
+	if Member(B, SafeStrings) then
+	*)
+	{First test == are any strings already safe?}
+	if SafeStrings <> nil then
+		begin
+			Safe := true;
+			if TraceNearLife then
+				writeln('Grp is safe.');
+		end
+	(*
+	Second Test : Is Group so close to life that we needn't worry about it?
+	*)
+	else if StackSize (HealthyEyes) + StackSize (UnHealthyEyes) > 4 then
+		begin
+			Safe := true;
+			if TraceNearLife then
+				writeln('Grp has many eyes.  Almost safe.');
+		end
+	else if CountPointsInList (HealthyEyes) + CountPointsInList (UnHealthyEyes) > 7 then
+		begin
+			Safe := true;
+			if TraceNearLife then
+				writeln('Grp has plenty of eyespace.  Almost Safe.');
+		end
+	else if CountPointsInList (HealthyEyes) + CountPointsInList (UnHealthyEyes) 
+					+ CountPointsInList (UnVitalEyes) > 12 then
+		begin
+			Safe := true;
+			if TraceNearLife then
+				writeln('Grp has plenty of eyespace.  Almost Safe.');
+		end
+	else
+		begin
+			{Heuristic order for finding Safety : Kill Enemies, Connect Outside,
+				Cut Eyes, Make Healthy, Conect Inside}
+			
+			(*
+			if SafeStrings <> nil then
+				SuggestedMoves := Connect(g, B, SafeStrings);   {Can B be connected to a safe string?}
+			
+			{Connecting Outside :: Could turn one of B's eyes Healthy, even if 
+				B is not connected to anything.  This aspect of connecting should be
+				covered in MakeHealthy (?) }
+			{ConnectOut will return all points that would connect B to an Unsafe String
+				without using an Eyespace.
+				Will ConnectOut need the Eye Lists?}
+			JoinStacks(SuggestedMoves, 
+					ConnectOut(g, B, Strings,HealthyEyes,UnHealthyEyes,TrueEyes) );
+			if TraceNearLife then
+				begin
+					write('Suggested Moves after Connecting Out');
+					PrintPointList(SuggestedMoves);
+					writeln;
+				end;
+			*)
+			{ Kill Enemies. }
+			JoinStacks (SuggestedMoves, KillEnemies (g, Grp, BlockColor) );
+			if TraceNearLife then
+				begin
+					write('Suggested Moves after Killing Enemies.');
+					PrintPointList(SuggestedMoves);
+					writeln;
+				end;
+			
+			{CutEyes.  Cut One Eyespace into several.
+				Do this for each type of eye.  No special order.}
+			
+			JoinStacks(SuggestedMoves, CutEachEye(g, HealthyEyes,StringColor) );
+			JoinStacks(SuggestedMoves, CutEachEye(g, UnHealthyEyes,StringColor) );
+			JoinStacks(SuggestedMoves, CutEachEye(g, TrueEyes,StringColor) );
+			if TraceNearLife then
+				begin
+					write('Suggested Moves after Cutting Eyes.');
+					PrintPointList(SuggestedMoves);
+					writeln;
+				end;
+				
+			{Make the non-vital eyes vital.  This is apt to be a better move.}
+			JoinStacks(SuggestedMoves, MakeListVital(gH, UnVitalEyes, BlockColor) );
+			if TraceNearLife then
+				begin
+					write('Suggested Moves after Making Vital Eyes.');
+					PrintPointList(SuggestedMoves);
+					writeln;
+				end;
+
+			{Connect Inside.  Connect ANY two strings of the group.}
+			JoinStacks(SuggestedMoves, ConnectAll(g, Strings) );
+			if TraceNearLife then
+				begin
+					write('Suggested Moves after Connecting All.');
+					PrintPointList(SuggestedMoves);
+					writeln;
+				end;
+				
+			returnSuggestedMoves := DeleteCopies (g, SuggestedMoves);
+			
+			if TraceNearLife then
+				begin
+					write('the suggested moves to return are: '); 
+					PrintPointList(returnSuggestedMoves);
+					writeln;
+				end;
+				
+			{xxx
+			Now, try each move until we find one that works.
+			Note : DON'T Repeat Moves!!
+			Then pop the rest of the possibilities and return.
+			
+			xxx Note -- To do the better Safe test, the opponent takes the FIRST
+			    space found, and the savior need only consider the REST of the 
+				 moves.  ???  Some of the moves may be no longer relevant.
+				 But if the earlier ones didn't work without the opponent there,
+				 they sure won't work WITH the opponent there.}
+			
+			if TraceNearLife then
+				begin
+					write('Final Suggested Moves are '); 
+					PrintPointList(SuggestedMoves);
+					writeln;
+				end;
+
+			
+			with gH^, DocumentInfo do
+				begin
+					done := false;
+					AttemptedMoves := nil;
+					if StringColor = BlackOcc then
+						BlackAttacker := false
+					else
+						BlackAttacker := true;
+					tempToPlay := dBlackToPlay;
+					tempWantGraphics := dWantGraphics;
+					dWantGraphics := false;
+					dBlackToPlay := not(BlackAttacker);
+					{Can the defender save by going first?}
+					NextMove := FindWorkingMove(gH, p2GOPoint(Grp^.Child^.Child^.Child), BlockColor,
+					AttemptedMoves, SuggestedMoves, Necessary);
+					
+					if not Necessary then
+						begin
+							if TraceNearLife then
+								writeln('move is not necessary.');
+							Safe := true
+						end
+					else 
+						begin
+							if TraceNearLife then
+								writeln('move is necessary.');
+							Safe := false;
+						end;
+					
+					dBlackToPlay := tempToPlay;
+					dWantGraphics := tempWantGraphics;
+					
+				end;  {with gH, DocumentInfo do}
+		end;  {if B is not Safe.}
+	{Return all storage to avail lists.}
+	ReturnToAvailList(g, HealthyEyes); 
+	ReturnToAvailList(g, UnHealthyEyes); 
+	ReturnToAvailList(g, UnVitalEyes); 
+	ReturnToAvailList(g, TrueEyes); 
+	ReturnToAvailList(g, SafeStrings); 
+	ReturnToAvailList(g, Strings); 
+	ReturnToAvailList(g, SuggestedMoves); 
+	ReturnToAvailList(g, AttemptedMoves);
+	if TraceNearLife then
+		begin
+			write('CreateLife returning ');
+			PrintPointItem(p2Node(NextMove));
+			writeln;
+			if Safe then
+				writeln('The string is safe')
+			else
+				writeln('The string is not safe');
+		end;
+
+	
+end;  {CreateLife1.}

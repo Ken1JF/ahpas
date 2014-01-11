@@ -1,0 +1,52 @@
+{	GOMover		Pascal Unit
+
+	DESCRIPTION
+		GOMover -- Supports move selection, background thinking.
+
+	AUTHOR
+			Ken Friedenbach
+			Copyright 1986 
+			All Rights Reserved.
+
+}
+
+{$I Flags.p} {Global options for compilations}
+
+UNIT GOMover;
+
+INTERFACE
+
+USES 
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	Timers, 
+	
+	CursorCtl, (* for spinning cursor, while playing *)
+
+	GraphOps, BoardOps, AbstHier, GOAbstHier, GOBoards,
+	GOExtensions, StringKill, NearLife;
+
+TYPE
+	TGameType = (HumanHuman, HumanComputer, ComputerComputer, Problem, Joseki);
+
+	TGameState = RECORD
+		GameType: TGameType;
+		Playing: Boolean;
+	END;
+	
+{ Move down to GOAbstHier? }
+
+function NumGrpPoints (g: P2Node): integer;
+	{ Given a group, counts the number of Points in the group. }
+
+function ComputeMove (gH: p2GOAbstHier; DoDevelopment: Boolean): p2GOPoint;
+
+procedure ThinkALittle;
+
+procedure UndoThinking;
+
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I GOMover2.p}
+END. {GOMover}

@@ -1,0 +1,2088 @@
+{	GOBoards2		Implementation of GOBoards.p
+
+	DESCRIPTION
+		GOBoards -- Supports dBoard definition, handicaps, placement,
+			rule checking, and drawing.
+
+	AUTHOR
+			Ken Friedenbach
+			Copyright 1988-1986 
+			All Rights Reserved.
+
+BUGS
+}
+
+CONST
+	DebugTokens = false;
+
+{$IFC TraceMakeMove}
+	TraceTryMoves = true;
+{$ELSEC}
+	TraceTryMoves = false;
+{$ENDC}
+
+
+VAR 
+	gLastError: integer;
+	
+	TokPtr, TokEnd: Ptr; TokStr: str255; TokVal: longint;
+
+	ThisAnalToNil: p2Analysis;
+
+{$S ARes}
+
+procedure ConditionalNil (Pnt : p2Node);
+	{Pnt points to one of the stones in Str.}
+	begin
+		if p2GOPoint(Pnt)^.AnalysisResult = ThisAnalToNil then
+			p2GOPoint(Pnt)^.AnalysisResult := nil;
+	end; {ConditionalNil}
+	
+procedure NilTheAnalysis (gH : p2GoAbstHier; Pnt1: p2Node);
+
+	procedure DoNilAnalysis (Pnt: p2Node);
+		begin
+			ThisAnalToNil := p2GOPoint(Pnt)^.AnalysisResult;
+			if ThisAnalToNil <> nil then
+				begin
+					{$IFC TraceReturnAnalysis}
+					write('Calling ReturnAnalysis @', ord4(ThisAnalToNil):1);
+					write(', point = ');
+					PrintPointItem (Pnt);
+					write (' target = '); 
+					PrintPointItem (ThisAnalToNil^.target);
+					writeln;
+					{$ENDC}
+					EachElement (p2GOPoint(Pnt)^.PtNode, ConditionalNil);
+					ReturnAnalysis(@gH^.PointGraph, ThisAnalToNil);
+				end;
+		end; {DoNilAnalysis}
+		
+	begin {NilTheAnalysis}
+			EachElement (Pnt1, DoNilAnalysis);
+	end; {NilTheAnalysis}
+
+{$IFC qTrace}{$D++}{$ENDC}
+procedure RedrawChange (var gH: p2GOAbstHier; p: p2GOPoint; doAdjChk: Boolean);
+	{ Redraw changed point. }
+	{ Needs to be global, to be shared between Handicaps and Moving }
+
+{$IFC qTrace}{$D+}{$ENDC}
+	procedure ChangeAdjacent (pDoc: p2DocInfo; chgPt: p2GOPoint);
+		var
+			newState: integer;
+		begin
+			newState := CompPtState (pDoc, chgPt);
+			with gH^ do
+				begin
+					if newState <> chgPt^.PtStrType.PtStateInt then
+						begin
+							{$IFC TraceRequest} 
+							write ('#5 ');
+							{$ENDC}
+							ChangeState (pDoc, @PointGraph, TAbstHierNode(chgPt), 
+									newState, true);
+						end;
+					RequestChanges (pDoc, @StringGraph, chgPt, chgPt^.PtNode);
+				end;
+		end; {ChangeAdjacent}
+	
+	begin {RedrawChange}
+		with gH^, DocumentInfo do
+			begin
+				{$IFC TraceRequest} 
+				write ('#6 ');
+				{$ENDC}
+				ChangeState (@DocumentInfo, @PointGraph,TAbstHierNode (p), 
+					CompPtState (@DocumentInfo, p),true);
+				EachAdjPoint (@DocumentInfo, p, ChangeAdjacent);
+				CheckChanges (@DocumentInfo, @PointGraph);
+			end;
+		with p^ do
+			InvalGOPoint (gH, XCoord, YCoord);
+	end; {RedrawChange}
+	
+{$IFC qTrace}{$D++}{$ENDC}
+{$S AOpen}
+function SetUpGOBoard (gH: p2GOAbstHier; siz: integer; nHand: integer; 
+			forReplay: Boolean): p2GOAbstHier;
+
+	procedure CallRedrawChange (pDoc: p2DocInfo; p: p2GOPoint; doAdjChk: Boolean);
+		{ needed to pick up gH via up level addressing and pass it to RedrawChange }
+		begin
+			RedrawChange (gH, p, doAdjChk);
+		end; {CallRedrawChange}
+		
+	var x, y: integer; p: p2GOPoint;
+	begin
+		{$IFC TraceInit}
+		DebugStr ('Entering SetUpGOBoard.');
+		{$ENDC}
+		
+		gH := InitGOAbstHier (gH);
+		
+		with gH^, StringGraph do
+			InitDocInfo (DocumentInfo, siz, nHand, InitNode, forReplay);
+
+		with gH^, DocumentInfo do
+			begin
+				{ performance issue: take elements off list in opposite order }
+				for x := dBoardSize downto 1 do
+					for y := dBoardSize downto 1 do
+						ChangeState (@DocumentInfo, @PointGraph, TAbstHierNode (@dBoard [x][y]), 
+							CompPtState (@DocumentInfo, @dBoard [x][y]), true);
+				(* Aren't any! CheckChanges (@DocumentInfo, @PointGraph); *)
+				if gJosekiTree <> nil then
+					StartJosekiManagers (@DocumentInfo, gJosekiTree);
+				SetUpHandicap (@DocumentInfo, nHand, CallRedrawChange);
+			end;
+		SetUpGOBoard := gH;
+
+		{$IFC TraceInit}
+		DebugStr ('Leaving SetUpGOBoard.');
+		{$ENDC}
+	end; {SetUpGOBoard}
+
+{$S ARes}
+function PlaceStone (var gH: p2GOAbstHier; pt: Point;
+	var changePt: p2GOPoint; GOPointKnown: Boolean;
+			MakingPermanent: Boolean) :integer;
+	{ supports pass: GOPointKnown = true, and changePt = nil }
+	{ if GOPointKnown is false, then }
+	{ pt is passed in Local coordinates. }
+	{ returns: }
+	{ 0 and sets drawRect if point was a legal move. }
+	{ 1 if point is off the edge of dBoard. }
+	{ 2 if point is already occupied. }
+		{ passes on errors detected by MakeMove: }
+	{ 3 if point is illegal suicide move. }
+	{ 4 if point is illegal Ko move. }
+	var nearX, nearY: integer;
+		movRes: integer;
+		
+	begin
+		PlaceStone := 1;  { be pessimistic }
+		
+		with gH^, DocumentInfo do
+			begin
+				if not GOPointKnown then
+					begin
+						nearX := pt.h - dHorOffset;
+						if nearX <= 0 then exit (PlaceStone);
+						{ xxx need to have better "near" algorithm, i.e. within circle }
+						{ xxx need to report as "error" attempt to move too close to center of a square }
+						nearX := ((nearX-1) div dBoxH) +1;
+						if nearX > dBoardSize then exit (PlaceStone);
+				
+						nearY := pt.v - dVerOffset;
+						if nearY <= 0 then exit (PlaceStone);
+						nearY := ((nearY-1) div dBoxV) +1;
+						if nearY > dBoardSize then exit (PlaceStone);
+						nearY := dBoardSize - nearY + 1;
+				
+						changePt := @dBoard [nearX][nearY];
+					end;
+				if changePt = nil then
+					begin
+						movRes := MakeMove (@DocumentInfo, nil);
+						if movRes <> 0 then
+							begin
+								PlaceStone := movRes;  exit (PlaceStone);
+							end;
+					end
+				else
+					with changePt^ do
+						if OccStatus <> UnOcc then
+							begin
+								PlaceStone := 2;  exit (PlaceStone);
+							end
+						else
+							begin
+								movRes := MakeMove (@DocumentInfo, changePt);
+								if movRes <> 0 then
+									begin
+										PlaceStone := movRes;  exit (PlaceStone);
+									end;
+							end;
+			end;
+
+		PlaceStone := 0;
+	end; {PlaceStone}
+	
+{$S ANonRes}
+procedure MoveError (whichErr: integer);
+{ Give a "Beep" or display a dialog box in response to an illegal move. }
+	const
+		MoveErrorDLOG = 130; { + whichErr }
+		okButton = 1;
+	var
+		itemHit : integer;
+		pDialog : DialogPtr;
+	begin
+		if (gLastError = 0) or (gLastError <> whichErr) then
+			begin
+			(* ***
+				if blinking then
+					begin
+						turn off blinking
+					end
+				else
+				*** *)
+					begin
+						gLastError := whichErr;
+						SysBeep (5);
+					end;
+			end
+		else
+			begin
+				pDialog := GetNewDialog (MoveErrorDLOG + whichErr, 
+					nil, WindowPtr(-1));
+				SetCursor(arrow);
+				repeat 
+					ModalDialog(nil, itemHit)
+				until (itemHit = okButton);
+				
+				CloseDialog(pDialog);
+				gLastError := 0;
+			end;
+	end; {MoveError}
+
+{$S Main }	
+{$IFC qTrace}{$D+}{$ENDC}
+procedure UnMakeMove (gH: p2GOAbstHier);
+	{ Undo the last Move (dNextMove-1) }
+	{ Clear the stone }
+	{ Put back any captured stones }
+	{ Reset dKoPoint and dCapStone(?) }
+
+{$IFC qTrace}{$D+}{$ENDC}
+	procedure ChangeAdjacent (pDoc: p2DocInfo; p2: p2GOPoint);
+		var
+			newState: integer;
+		begin
+			newState := CompPtState (pDoc, p2);
+			with gH^ do
+				begin
+					if newState <> p2^.PtStrType.PtStateInt then
+						begin
+							{$IFC TraceRequest} 
+							write ('#8 ');
+							{$ENDC}
+							ChangeState (pDoc, @PointGraph, TAbstHierNode(p2), 
+									newState, true);
+						end;
+					RequestChanges (pDoc, @StringGraph, p2, p2^.PtNode)
+				end;
+		end; {ChangeAdjacent}
+		
+	var
+		cap: integer; CapPoint: p2GOPoint;
+		
+	begin {UnMakeMove}
+		with gH^, DocumentInfo do
+		begin
+			with dGameRecord [dNextMove-1] do
+				begin
+					if TraceTryMoves then
+						begin
+							write ('UnMakeMove for ');
+							if MovePoint <> nil then with MovePoint^ do
+								writePoint (XCoord, YCoord);
+							writeln;
+						end;
+						
+					if MovePoint <> nil then
+						begin
+							MovePoint^.OccStatus := UnOcc;
+							{ xx Should this be done later? }
+							{$IFC TraceRequest} 
+							write ('#9 ');
+							{$ENDC}
+							ChangeState (@DocumentInfo, @PointGraph, TAbstHierNode (MovePoint),
+													CompPtState (@DocumentInfo, MovePoint),
+													true);
+							if TraceTryMoves then
+								writeln (' in UnMakeMove, ChangeState done. ');
+							(* *** *** *)
+							CheckChanges (@DocumentInfo, @PointGraph);
+							if TraceTryMoves then
+								writeln (' in UnMakeMove, CheckChanges done. ');
+								(* *** *** *)
+							EachAdjPoint (@DocumentInfo, MovePoint, ChangeAdjacent);
+							if TraceTryMoves then
+								writeln (' in UnMakeMove, EachAdjPoint ... ChangeAdjacent done. ');
+							CheckChanges (@DocumentInfo, @PointGraph);
+							if TraceTryMoves then
+								writeln (' in UnMakeMove, CheckChanges #2 done. ');
+							with MovePoint^ do
+								InvalGOPoint (gH, XCoord, YCoord);
+							cap := FirstCapture;
+						end
+					else
+						cap := 0;
+				end;
+				
+			while cap <> 0 do
+				with dGameRecord [cap] do
+					begin
+						CapPoint := MovePoint;
+						CapPoint^.OccStatus := MoveColor;
+						if cap >= dFirstNumber then
+							CapPoint^.StoneMark := cap - (dNextMove-dNextStone)
+						else
+							CapPoint^.StoneMark := 0;
+						CapPoint^.MoveIndex := cap;
+						CapturedBy := 0;
+						{$IFC TraceRequest} 
+						write ('#10 ');
+						{$ENDC}
+						ChangeState (@DocumentInfo, @PointGraph, 
+												TAbstHierNode (CapPoint),
+												CompPtState (@DocumentInfo, CapPoint),
+												true);
+						if TraceTryMoves then
+							writeln (' in UnMakeMove, ChangeState for un-Capture done. ');
+						EachAdjPoint (@DocumentInfo, CapPoint, ChangeAdjacent);
+						if TraceTryMoves then
+							writeln (' in UnMakeMove, ChangeState EachAdjPoint...ChangeAdjacent for un-Capture done. ');
+						CheckChanges (@DocumentInfo, @PointGraph);
+						if TraceTryMoves then
+							writeln (' in UnMakeMove, CheckChanges for un-Capture done. ');
+						with CapPoint^ do
+							InvalGOPoint (gH, XCoord, YCoord);
+						cap := nextCapture;
+					end;
+					
+			dNextMove := dNextMove-1;
+			dNextStone := dNextStone-1;
+			if dNextStone < 1 then
+				dNextStone := 1;
+			dBlackToPlay := not dBlackToPlay;
+			dKoPoint := dGameRecord [dNextMove-1].KoPoint;
+		end;
+	end; {UnMakeMove}
+
+{$S ARes}
+function TryMakeMove (gH: p2GOAbstHier; atPoint: Point; tellUser: Boolean;
+			var changePt: p2GOPoint; GOPointKnown: Boolean;
+			MakingPermanent: Boolean): integer;
+	{ supports pass: GOPointKnown = true, and atPoint = nil }
+	{ PlaceStone }
+	{ Invalidate for Update }
+	{ Change AbstHier State }
+	{ CheckFor and do Captures }
+	{ Check for adjacent point changes }
+	{ Optional: notify user of any errors }
+	{ returns: same as PlaceStone }
+
+	procedure CallRedrawChange (pDoc: p2DocInfo; p: p2GOPoint; doAdjChk: Boolean);
+		{ needed to pick up gH via up level addressing and pass it to RedrawChange }
+		begin
+			if MakingPermanent then
+				NilTheAnalysis (gH, p^.PtNode);
+			{ NilTheAnalysis needs to be done first! before strings are changed.}
+			RedrawChange (gH, p, doAdjChk);
+		end; {CallRedrawChange}
+		
+{$IFC qTrace}{$D+}{$ENDC}
+	procedure ChangeAdjacent (pDoc: p2DocInfo; p2: p2GOPoint);
+		var
+			newState: integer;
+		begin
+			newState := CompPtState (pDoc, p2);
+			with gH^ do
+				begin
+					if newState <> p2^.PtStrType.PtStateInt then
+						begin
+							{$IFC TraceRequest} 
+							write ('#11 ');
+							{$ENDC}
+							ChangeState (pDoc, @PointGraph, TAbstHierNode(p2), 
+								newState, true);
+						end;
+					RequestChanges (pDoc, @StringGraph, p2, p2^.PtNode);
+				end;
+		end; {ChangeAdjacent}
+		
+	VAR
+		placeTyp: integer;
+		
+	begin {TryMakeMove}
+		placeTyp := PlaceStone (gH, atPoint, changePt, GOPointKnown, MakingPermanent);
+		if TraceTryMoves then
+			begin
+				write ('TryMakeMove for ');
+				if changePt = nil then
+					write ('pass')
+				else with changePt^ do
+					writePoint (XCoord, YCoord);
+				writeln;
+			end;
+		if placeTyp = 0 then
+			begin
+				if changePt <> nil then
+					with gH^, changePt^ do
+						begin
+							InvalGOPoint (gH, XCoord, YCoord);
+							{$IFC TraceRequest} 
+							write ('#12 ');
+							{$ENDC}
+							ChangeState (@DocumentInfo, @PointGraph, TAbstHierNode (changePt),
+													CompPtState (@DocumentInfo, changePt),
+													true);
+							if DocumentInfo.dCapStone <> nil then
+								Capture (@DocumentInfo, CallRedrawChange);
+							EachAdjPoint (@DocumentInfo, changePt, ChangeAdjacent);
+							CheckChanges (@DocumentInfo, @PointGraph);
+						end;
+				gLastError := 0;
+			end
+		else if TellUser then
+			MoveError (PlaceTyp);
+		TryMakeMove := placeTyp;
+	end; {TryMakeMove}
+	
+procedure InvalGOPoint (gH: p2GOAbstHier; x, y: integer);
+	var
+		lft, rght, tp, bttm: integer;
+		r: Rect;
+	begin
+		if x <> 0 then { nothing needed for pass }
+			with gH^, DocumentInfo do
+				if dReadyForGraphics and dWantGraphics then
+					begin
+						lft := dBoxH * (x - 1) + dHorOffset;
+						tp := dBoxV * (dBoardSize - y) + dVerOffset;
+						rght := lft + dBoxH;
+						bttm := tp + dBoxV;
+						SetRect(r, lft, tp, rght, bttm);
+						InvalRect (r);
+						(* Note: InvalRect assumes that Board Window/View is active. *)
+						{ ObscureCursor; }
+						(* xxx ObscureCursor works, but the default mouse movement *)
+						(* to ShowCursor is too fine.  Need to increase. ?? *)
+					end;
+	end; {InvalGOPoint}
+	
+procedure HilightGOPoint (r: rect; JosekiValue: TJosekiValue);
+	{ highlight the rectange r }
+	begin
+		with r do
+			case JosekiValue of
+				GoodJosekiMove:
+					begin
+						MoveTo (left, top); LineTo (left+3, top+3);
+						MoveTo (left, bottom-1); LineTo (left+3, bottom-4);
+						MoveTo (right-1, top); LineTo (right-4, top+3);
+						MoveTo (right-1, bottom-1); LineTo (right-4, bottom-4);
+					end;
+				BadJosekiMove:
+					begin
+						PenSize (3, 3);
+						PenMode (srcXor);
+						MoveTo (left, top); LineTo (left+3, top+3);
+						MoveTo (left, bottom-3); LineTo (left+3, bottom-6);
+						MoveTo (right-3, top); LineTo (right-6, top+3);
+						MoveTo (right-3, bottom-3); LineTo (right-6, bottom-6);
+						PenNormal;
+					end;
+			end; {case JosekiValue}
+	end; {HilightGOPoint}
+
+{$S ARes}
+function IsJoseki (pDoc: p2DocInfo; root: p2JosekiTreeNode; 
+				x, y: integer; 
+				var JosekiOcc: TOccStatus; var JosekiNumber: integer;
+				var JosekiValue: TJosekiValue): Boolean;
+	var 
+		t: p2TreeNode;
+	begin
+		t := FindChild (@root^.tree, x, y);
+		if t <> nil then
+			with pDoc^ do
+				begin
+					IsJoseki := true;
+					if dBlackToPlay then
+						JosekiOcc := BlackOcc
+					else
+						JosekiOcc := WhiteOcc;
+					JosekiNumber := dNextMove; { xxx for games need? }
+					JosekiValue := p2JosekiTreeNode(t)^.value;
+				end
+		else
+			IsJoseki := false;
+	end; {IsJoseki}
+	
+function JosekiTransform (pDoc: p2DocInfo;  
+				isReflect: Boolean;
+				corn: integer;
+				x, y: integer; 
+				var NewX, NewY: integer): Boolean;
+	{ Transform Board (x,y) coordinates to "canonical" Joseki (NewX, NewY) }
+	var
+		scaleXY: integer;
+	begin
+		JosekiTransform := true; {be optimistic}
+		if (x=0) and (y=0) then {pass}
+			begin
+				NewX := 0; NewY := 0;
+			end
+		else with pDoc^ do
+			begin
+				case corn of
+					TpRtCorner:
+						if isReflect then
+							begin
+								NewX := y; NewY := x;
+							end
+						else
+							begin
+								NewX := x; NewY := y;
+							end;
+					TpLfCorner:
+						if isReflect then
+							begin
+								NewX := dBoardSize-x+1; NewY := y;
+							end
+						else
+							begin
+								NewX := y; NewY := dBoardSize-x+1;
+							end;
+					BtLfCorner:
+						if isReflect then
+							begin
+								NewX := dBoardSize-x+1; NewY := dBoardSize-y+1;
+							end
+						else
+							begin
+								NewX := dBoardSize-y+1; NewY := dBoardSize-x+1;
+							end;
+					BtRtCorner:
+						if isReflect then
+							begin
+								NewX := x; NewY := dBoardSize-y+1;
+							end
+						else
+							begin
+								NewX := dBoardSize-y+1; NewY := x;
+							end;
+					otherwise {xxx bad corner value?}
+						begin
+							{$IFC TraceJoseki}
+							writeln ('### Bad corner value in JosekiTransform ', corn:1);
+							{$ENDC}
+							JosekiTransform := false;
+							exit (JosekiTransform);
+						end;
+				end; {case corn}
+				scaleXY := 19-dBoardSize; { 0 for 19, 6 for 13, 8 for 11, 10 for 9 }
+				NewX := NewX + scaleXY;
+				NewY := NewY + scaleXY;
+				if (NewX<1) or (NewX>19) or
+					(NewY<1) or (NewY>19) then
+					begin
+						{$IFC TraceJoseki}
+						writeln ('### Transformed Coordinates off joseki board x= ', x:1, ' y= ', y:1,
+								' NewX=', NewX:1, ' NewY=', NewY:1, 
+								' corn=', corn:1, ' isReflect=', isReflect:1);
+						{$ENDC}
+						JosekiTransform := false;
+					end;
+			end; {with pDoc^ do}
+	end; {JosekiTransform}
+
+function InverseJosekiTransform (pDoc: p2DocInfo;  
+				isReflect: Boolean;
+				corn: integer;
+				x, y: integer; 
+				var NewX, NewY: integer): Boolean;
+	{ Transform "canonical" Joseki (NewX, NewY) coordinates to Board (x,y) }
+	var
+		scaleXY: integer; scaleX, scaleY: integer;
+	begin
+		InverseJosekiTransform := true; {be optimistic}
+		if (x=0) and (y=0) then {pass}
+			begin
+				NewX := 0; NewY := 0;
+			end
+		else with pDoc^ do
+			begin
+				scaleXY := 19-dBoardSize; { 0 for 19, 6 for 13, 8 for 11, 10 for 9 }
+				scaleX := x - scaleXY;
+				scaleY := y - scaleXY;
+				case corn of
+					TpRtCorner:
+						if isReflect then
+							begin
+								NewX := scaleY; NewY := scaleX;
+							end
+						else
+							begin
+								NewX := scaleX; NewY := scaleY;
+							end;
+					TpLfCorner:
+						if isReflect then
+							begin
+								NewX := dBoardSize-scaleX+1; NewY := scaleY;
+							end
+						else
+							begin
+								NewX := dBoardSize-scaleY+1; NewY := scaleX;
+							end;
+					BtLfCorner:
+						if isReflect then
+							begin
+								NewX := dBoardSize-scaleX+1; NewY := dBoardSize-scaleY+1;
+							end
+						else
+							begin
+								NewX := dBoardSize-scaleY+1; NewY := dBoardSize-scaleX+1;
+							end;
+					BtRtCorner:
+						if isReflect then
+							begin
+								NewX := scaleX; NewY := dBoardSize-scaleY+1;
+							end
+						else
+							begin
+								NewX := scaleY; NewY := dBoardSize-scaleX+1;
+							end;
+					otherwise {xxx bad corner value?}
+						begin
+							{$IFC TraceJoseki}
+							writeln ('### Bad corner value in InverseJosekiTransform ', corn:1);
+							{$ENDC}
+							InverseJosekiTransform := false;
+							exit (InverseJosekiTransform);
+						end;
+				end; {case corn}
+				if (NewX<1) or (NewX>dBoardSize) or
+					(NewY<1) or (NewY>dBoardSize) then
+					begin
+						{$IFC TraceJoseki}
+						writeln ('### InverseTransformed Coordinates off board x=', 
+							x:1, ' y=', y:1, ' NewX=', NewX:1, ' NewY=', NewY:1, 
+							' corn=', corn:1, ' isReflect=', isReflect:1);
+						{$ENDC}
+						InverseJosekiTransform := false;
+					end;
+			end; {with pDoc^ do}
+	end; {InverseJosekiTransform}
+
+{$S ARes}
+{$IFC qTrace}{$D+}{$ENDC}
+procedure DrawHorLine (V, H1, H2: integer);
+	begin
+		MoveTo (H1, V);
+		LineTo (H2, V);
+	end; {DrawVerLine}
+
+{$S ARes}
+procedure DrawVerLine (H, V1, V2: integer);
+	begin
+		MoveTo (H, V1);
+		LineTo (H, V2);
+	end; {DrawVerLine}
+
+{$S ARes}
+{$IFC qTrace}{$D+}{$ENDC}
+							
+procedure DrawPoint (pDoc: p2DocInfo; x, y: integer; 
+				showJoseki: TShowJoseki; JosekiT: p2JosekiTreeNode;
+				var lastMoveRect: Rect; area: Rect);
+	var
+		lft, rght, tp, bttm, midH, midV: integer;
+		r: Rect;
+		
+	procedure DrawCorner (V1, H2: integer);
+		var V2: integer;
+		begin
+			PenSize (3, 3);
+			V2 := midV - 1;
+			DrawVerLine (midH - 1, V1, V2);
+			LineTo (H2, V2);
+		end; {DrawCorner}
+ 
+	procedure DrawHorEdge (V1, V2: integer);
+		begin
+			DrawVerLine (midH, V1, V2);
+			PenSize (3, 3);
+			with r do
+				DrawHorLine (midV - 1, left, right - 3);
+		end; {DrawHorEdge}
+ 
+	procedure DrawVerEdge (H1, H2: integer);
+		begin
+			DrawHorLine (midV, H1, H2);
+			PenSize (3, 3);
+			DrawVerLine (midH - 1, r.top, r.bottom - 2);
+		end; {DrawVerEdge}
+ 
+	procedure DrawCross;
+		begin
+			with r do
+				begin
+					DrawVerLine (midH, top, bottom - 1);
+					DrawHorLine (midV, left, right - 1);
+				end;
+		end; {DrawCross}
+	
+	procedure DrawNumber (BorW: TOccStatus; num: integer);
+		var ch: char; s: Str255; len: integer;
+			width: integer;
+		begin
+			num := num mod 1000; { insure <= 3 digits }
+			NumToString (num, s);
+			len := length(s);
+			TextFont (numberFont);
+			TextFace ([bold]);
+			if BorW = BlackOcc then 
+				TextMode (srcBic)
+			else 
+				TextMode (srcOr);
+
+			with pDoc^ do
+				begin
+					if dBoxH = 16 then
+						begin
+							case len of
+								1: begin
+										TextSize (12);
+										width := StringWidth(s);
+										MoveTo (lft+8-(width+1) div 2, bttm-4);
+										DrawString (s);
+									end;
+								2: begin
+										TextSize (10);
+										width := StringWidth(s);
+										MoveTo (lft+8-(width+1) div 2, bttm-5);
+										DrawString (s);
+									end;
+								3: begin
+										TextSize (9);
+										width := StringWidth(s);
+										MoveTo (lft+8-(width+1) div 2, bttm-5);
+										DrawString (s);
+									end;
+							end; {cases}
+						end
+					else {dBoxH = 20}
+						begin
+							case len of
+								1: begin
+										TextSize (16);
+										width := StringWidth(s);
+										MoveTo (lft+10-(width+1) div 2, bttm-4);
+										DrawString (s);
+									end;
+								2: begin
+										TextSize (14);
+										width := StringWidth(s);
+										MoveTo (lft+10-(width+1) div 2, bttm-5);
+										DrawString (s);
+									end;
+								3: begin
+										TextSize (12);
+										width := StringWidth(s);
+										MoveTo (lft+10-(width+1) div 2, bttm-6);
+										DrawString (s);
+									end;
+							end; {cases}
+						end;
+				end;
+				
+		end; {DrawNumber}
+		
+	var
+		r2, junk: Rect;
+
+		JosekiOcc: TOccStatus;
+		JosekiNumber: integer;
+		JosekiValue: TJosekiValue;
+		doJoseki: Boolean;
+		corn: integer; { index into normal and reflected Joseki arrays }
+		NewX, NewY: integer; { the "canonical coordinates" for x, and y }
+		tempJos: p2JosekiTreeNode;
+ 
+		
+	begin {DrawPoint}
+		with pDoc^ do
+			begin
+				lft := dBoxH * (x - 1) + dHorOffset;
+				rght := lft + dBoxH;
+				tp := dBoxV * (dBoardSize - y) + dVerOffset;
+				bttm := tp + dBoxV;
+				SetRect (r, lft, tp, rght, bttm);
+				with dBoard[x, y] do
+					begin
+						if (OccStatus <> UnOcc) and (MoveIndex = dNextMove-1) then
+							lastMoveRect := r;
+						if SectRect (r, area, junk) then
+								begin
+									PenNormal;
+									case OccStatus of
+									UnOcc:
+										begin
+											case showJoseki of
+												HideJoseki: 
+													doJoseki := false;
+												EditOneJoseki:
+													doJoseki := IsJoseki (pDoc, JosekiT, 
+														x, y, JosekiOcc, JosekiNumber, JosekiValue);
+												ShowAllJoseki:
+													begin
+														doJoseki := false;
+														for corn := TpRtCorner to BtRtCorner do
+															begin
+																if not doJoseki then
+																	begin
+																		tempJos := dNormalJoseki [corn].JosekiTree;
+																		if tempJos <> nil then
+																			begin
+																				if JosekiTransform (pDoc, false, corn,
+																							x, y, NewX, NewY) then
+																					doJoseki := IsJoseki (pDoc, tempJos, 
+																							NewX, NewY, JosekiOcc, 
+																							JosekiNumber, JosekiValue);
+																			end;
+																	end;
+																if not doJoseki then
+																	begin
+																		tempJos := dReflectJoseki [corn].JosekiTree;
+																		if tempJos <> nil then
+																			begin
+																				if JosekiTransform (pDoc, true, corn,
+																							x, y, NewX, NewY) then
+																					doJoseki := IsJoseki (pDoc, tempJos, 
+																							NewX, NewY,	JosekiOcc, 
+																							JosekiNumber,	JosekiValue);
+																			end;
+																	end;
+															end;
+													end;
+											end; {case showJoseki}
+											if doJoseki then
+												case JosekiOcc of
+													BlackOcc:
+														begin
+															(* PenSize (3, 3); *)
+															PaintOval (r);
+															DrawNumber (BlackOcc, JosekiNumber);
+															PenSize (1, 1);
+															HilightGOPoint (r, JosekiValue);
+														end;
+													WhiteOcc:
+														begin
+															(* PenSize (1, 1); *)
+															EraseOval (r);
+															FrameOval (r);
+															DrawNumber (WhiteOcc, JosekiNumber);
+															HilightGOPoint (r, JosekiValue);
+														end;
+												end {case JosekiOcc}
+											else
+												begin
+													midV := tp + dBoxV div 2;
+													midH := lft + dBoxH div 2;
+													case PtType of
+														Center:  DrawCross;
+														LftEdge: DrawVerEdge (midH, rght - 1);
+														RhtEdge: DrawVerEdge (lft, midH - 1);
+														TopEdge: DrawHorEdge (midV, bttm - 1);
+														BotEdge: DrawHorEdge (tp - 1, midV - 1);
+														Hoshi:
+															begin
+																DrawCross;
+																SetRect (r2, midH - 2, midV - 2, 
+																				midH + 3, midV + 3);
+																FillOval (r2, black);
+															end;
+														TpLfCorner: DrawCorner (bttm - 2, rght - 3);
+														TpRtCorner: DrawCorner (bttm - 2, lft);
+														BtLfCorner: DrawCorner (tp, rght - 3);
+														BtRtCorner: DrawCorner (tp, lft);
+													end; {case PtType}
+												end;
+										end;
+									BlackOcc:
+										begin
+											(* PenSize (3, 3); *)
+											PaintOval (r);
+											if dNumberStones then
+												if MoveIndex >= dFirstNumber then
+													if StoneMark > 0 then
+														DrawNumber (BlackOcc, StoneMark);
+										end;
+									WhiteOcc:
+										begin
+											(* PenSize (1, 1); *)
+											EraseOval (r);
+											FrameOval (r);
+											if dNumberStones then
+												if MoveIndex >= dFirstNumber then
+													if StoneMark > 0 then
+														DrawNumber (WhiteOcc, StoneMark);
+										end;
+									end;{case dBoard...OccStatus}
+							end; {if SectRect}
+					end; {with dBoard [x, y]}
+			end; {with pDoc^}
+	end; {DrawPoint}
+
+procedure DrawBoard (pDoc: p2DocInfo; area: Rect; doClipPICT: Boolean; 
+				showJoseki: TShowJoseki; JosekiT: p2JosekiTreeNode;
+				var lastMoveRect: Rect);
+	var
+		x, y: integer;
+		s: string[2];
+
+	procedure LabelNumber (H, V: integer);
+		{ H is 0 for leftside, dBoardSize for rightside }
+		{ V is dBoardSize downto 1 (top down to bottom) }
+		var s: string[2]; lft, bttm: integer;
+		begin
+			TextFont (numberFont);
+			TextFace ([]);
+			TextMode (srcOr);
+			TextSize (12);
+			
+			with pDoc^ do
+				begin
+					bttm := dBoxV * (dBoardSize - V) + dVerOffset + dBoxV - 6;
+			
+					if H = 0 then
+						lft := 4
+					else
+						lft := dBoxH * H + dHorOffset + 4;
+								
+					MoveTo (lft, bttm);
+			
+					s := '  ';
+					if V < 10 then
+						s[2] := chr (ord('0') + V)
+					else {10 <= s[2] <= dBoardSize <= 19}
+						begin
+							s[1] := '1';
+							s[2] := chr (ord('0') + (V - 10));
+						end;
+				end;
+				
+			DrawString (s);
+		end; {LabelNumber}
+	
+	procedure LabelLetters (V: integer);
+		{ V is 0 for Top, dBoardSize for Bottom }
+		var ch: char; h, lft, bttm, width: integer; RowLetter: String [19];
+		begin
+			RowLetter := 'ABCDEFGHJKLMNOPQRST';
+			TextFont (numberFont);
+			TextFace ([]);
+			TextMode (srcOr);
+			TextSize (12);
+			
+			with pDoc^ do
+				begin
+					if V=0 then
+						bttm := dVerOffset-4
+					else
+						bttm := dBoxV * V + 2*dVerOffset - 12;
+			
+					for h := 1 to dBoardSize do
+						begin
+							ch := RowLetter[h];
+							width := CharWidth(ch);
+							lft := dBoxH*(h-1) + dHorOffset;
+							lft := lft + (dBoxH-width) div 2;
+							MoveTo (lft, bttm);
+							DrawChar (ch);
+						end;
+				end;
+				
+		end; {LabelLetters}
+				
+	CONST
+		LineLayoutOff = 155; { see Macintosh Technical Notes #92 The Appearance of Text }
+		LineLayoutOn = 156;
+		
+		DebugPicComment = false;
+		
+	begin {DrawBoard}
+		{ lastMoveRect := gZeroRect; done by caller in Macapp land. }
+		if doClipPICT then
+			begin
+				{ xxx optimize by drawing 38 lines, don't draw non-Hoshi empty points below. }
+				if gNoLineLayout then
+					PicComment (LineLayoutOff, 0, NIL);
+			end;
+				
+		with pDoc^ do
+			begin
+
+				if dLabelBoard then
+					LabelLetters (0);
+					
+				for y := dBoardSize downto 1 do
+					begin
+						if dLabelBoard then
+							LabelNumber (0, y);
+						for x := 1 to dBoardSize do
+							DrawPoint (pDoc, x, y, showJoseki, JosekiT,
+										lastMoveRect, area);
+						if dLabelBoard then
+							LabelNumber (dBoardSize, y);
+					end;
+
+				if dLabelBoard then
+					LabelLetters (dBoardSize);
+
+			end;
+			
+		if doClipPICT then
+			if gNoLineLayout then
+				begin
+					{$IFC qDebug}
+						if DebugPicComment then
+							writeln ('PicComment: LineLayoutOn');
+					{$ENDC}
+					PicComment (LineLayoutOn, 0, NIL);
+				end;
+				
+	end; {DrawBoard}
+
+
+(* **** GO Board Text File Read and Write Stuff **** *)
+
+{$S AReadFile}
+procedure SkipSpaces;
+	var
+		done: boolean;
+		chval: integer;
+	begin
+		done := false;
+		while not done do
+			if TokPtr = TokEnd then done := true
+			else 
+				begin
+					chval := TokPtr^;
+					if (chval > 32) or (chval < 0) then done := true
+					else TokPtr := Ptr(ord4(TokPtr)+1);
+				end;
+	end; {SkipSpaces}
+
+{$S AReadFile}
+procedure GetToken;
+{ Get the next token, skipping blanks, CR, and comments }
+	var
+		done: boolean;			{ controls termination of loop }
+		chval: SignedByte;	{ value of byte being examined }
+		len: integer;				{ length of token }
+		StrPtr: Ptr;				{ pointer into token string }
+		cState: nState;			{ result of StrToInt conversion }
+	begin
+		SkipSpaces;
+		TokStr := ''; len := 0; TokVal := 0;
+		StrPtr := Ptr (ord4 (@TokStr) + 1);
+		done := false;
+		while not done do
+			if TokPtr = TokEnd then done := true
+			else 
+				begin
+					chval := TokPtr^;
+					if (chval <= 32) and (chval >= 0) then done := true
+					else
+						begin
+							StrPtr^ := chval;
+							{ xxx support comments at end of a token }
+							StrPtr := Ptr(ord4(StrPtr)+1);
+							TokPtr := Ptr(ord4(TokPtr)+1);
+							len := len + 1;
+							if chval in [ord('('), ord(')'), ord('['), ord (']')] then
+								done := true;
+						end;
+				end;
+		TokStr [0] := chr(len);
+		TokVal := StrToInt (StringPtr (@TokStr), cState);
+		if DebugTokens then
+			writeln ('Token = "', TokStr, '", TokVal = ', TokVal:1);
+	end; {GetToken}
+
+{$S AReadFile}
+procedure GetOptString;
+{ If there is a string on this line, get it. }
+{ Otherwise, set TokStr to the empty string. }
+	var
+		done: boolean;			{ controls termination of loop }
+		chval: SignedByte;	{ value of byte being examined }
+		len: integer;				{ length of token }
+		StrPtr: Ptr;				{ pointer into token string }
+	begin
+		TokStr := ''; len := 0;
+		StrPtr := Ptr (ord4 (@TokStr) + 1);
+		done := false;
+		while not done do
+			if TokPtr = TokEnd then done := true
+			else 
+				begin
+					chval := TokPtr^;
+					if chval = 13 {CR} then done := true
+					else 
+						begin
+							StrPtr^ := chval;
+							{ xxx support comments at end of a token }
+							StrPtr := Ptr(ord4(StrPtr)+1);
+							TokPtr := Ptr(ord4(TokPtr)+1);
+							len := len + 1;
+						end;
+				end;
+		TokStr [0] := chr(len);
+		if len > 0 then
+			begin
+				TrimBlanks (StringPtr (@TokStr));
+				if DebugTokens then
+					writeln ('OptString = "', TokStr, '"');
+			end
+		else if DebugTokens then
+			writeln ('OptString = ""');
+	end; {GetOptString}
+
+{$S AWriteFile}
+function WriteGODoc (pDoc: p2DocInfo; var err: integer; var numChars: longint): Handle;
+	{ WriteGODoc returns the following values: }
+	{ 0		No Error. }
+	{ 1		In AddString, PtrAndHand returned error. }
+		var 
+			s: str255; i,j: integer; labelI: Boolean;
+			PeriodTab, TabTab: string[2];
+			s2: String[2]; RowLetter: String [19];
+			fText: Handle;
+		
+		procedure AddString;
+			var err: integer; len: integer;
+			begin
+				len := length(s)+1;
+				s [0] := chr (len);
+				s [len] := CR;
+				err := PtrAndHand (Ptr(ord4(@s)+1), fText, length(s));
+				if err <> noErr then
+					begin
+						GOEngineError ('In AddString, PtrAndHand returned error: ', err, 1);
+						err := 1;
+						exit (WriteGODoc);
+					end;
+			end; {AddString}
+			
+		procedure WriteHeader;
+			begin
+				with pDoc^ do
+					begin
+						if dTitle <> '' then
+							Koncat (@s, StringPtr(@dTitle));
+						AddString;
+						if dWhitePlayer <> DefaultWhitePlayer then
+							begin
+								s := '%White ';
+								Koncat (@s, StringPtr(@dWhitePlayer));
+								{ xxx later, support ranks. }
+								AddString;
+							end;
+						if dBlackPlayer <> DefaultBlackPlayer then
+							begin
+								s := '%Black ';
+								Koncat (@s, StringPtr(@dBlackPlayer));
+								{ xxx later, support ranks. }
+								AddString;
+							end;
+						if dGameTerms = EvenGame then
+							s := '%Terms Even'
+						else
+							begin
+								s := '%Terms ';
+								Koncat (@s, IntToStr (dNumHandicap, 1, false));
+								if dGameTerms = StonesHandicap then
+									KoncatCst (@s, ' Stones')
+								else if dGameTerms = PassesHandicap then
+									KoncatCst (@s, ' Passes')
+								else { dGameTerms = KomiHandicap }
+									KoncatCst (@s, ' Komi');
+							end;
+						AddString;
+						s := '%Size ';
+						Koncat (@s, IntToStr (dBoardSize, 1, false));
+						AddString;
+						if dGameRules = JapaneseRules then
+							s := '%Rules Japanese'
+						else
+							s := '%Rules Chinese';
+						AddString;
+					end;
+			end; {WriteHeader}
+		
+		var
+			nTreeNodes : integer;
+			
+		procedure WriteJosekiTree (root: p2JosekiTreeNode);
+			var
+				Child : p2JosekiTreeNode;
+			begin
+				if root <> nil then
+					begin
+						nTreeNodes := nTreeNodes + 1;
+						if  (nTreeNodes mod 10) = 0 then
+							begin
+								AddString;
+								s := '(';
+							end
+						else
+							KoncatCst (@s, '(');
+						with root^ do
+							begin
+								if tree.TreeMoveX = 0 then { pass }
+									KoncatCst (@s, 'pass ')
+								else
+									begin
+										s2[1] := RowLetter [tree.TreeMoveX];
+										Koncat (@s, @s2);
+										Koncat (@s, IntToStr (tree.TreeMoveY, 1, false));
+										KoncatCst (@s, ' ');
+									end;
+								if value <> GoodJosekiMove then
+									begin
+										KoncatCst (@s, '[bad ]');
+									end;
+								Child := p2JosekiTreeNode (root^.tree.FirstContinuation);
+								while Child <> nil do
+									begin
+										WriteJosekiTree (Child);
+										Child := p2JosekiTreeNode (Child^.tree.NextAlternative);
+									end; 
+							end;
+						KoncatCst (@s, ')');
+					end;
+			end; {WriteJosekiTree}
+
+		begin {WriteGODoc}
+			with pDoc^ do
+				begin
+					WriteGODoc := nil;
+					fText := NewHandle (0);
+					if fText = nil then
+						begin
+							err := 1;
+							exit (WriteGODoc);
+						end;
+					PeriodTab := '. ';
+					PeriodTab [2] := Tab;
+					TabTab := '  ';
+					TabTab [1] := Tab;
+					TabTab [2] := Tab;
+					s2 := '  '; 
+					RowLetter := 'ABCDEFGHJKLMNOPQRST';
+					s := '%GO ';
+					Koncat (@s, IntToStr (dFormat, 1, false));
+					AddString;
+					if dDate <> '' then
+						begin
+							s := '%Date ';
+							Koncat (@s, StringPtr(@dDate));
+							AddString;
+						end;
+					if dPlace <> '' then
+						begin
+							s := '%Place ';
+							Koncat (@s, StringPtr(@dPlace));
+							AddString;
+						end;
+					if dType = DocGame then
+						begin {%Game}
+							s := '%Game ';
+							WriteHeader;
+							i := 1; j := 1; labelI := true; s := '';
+							if dGameTerms = StonesHandicap then
+								begin
+									j := dNumHandicap + 1;
+								end;
+							{ xxx a bug: should be writing the moves by index, not marks. }
+							while j < dNextMove do
+								with dGameRecord [j] do
+									begin
+										if labelI then
+											begin
+												if i > 2 then
+													begin
+														AddString;  s := '';
+													end;
+												s := IntToStr (i, 3, false)^;
+												Koncat (@s, @PeriodTab);
+											end
+										else
+											Koncat (@s, @TabTab);
+										if MovePoint = nil then
+											KoncatCst (@s, 'pass')
+										else with MovePoint^ do
+											begin
+												s2[1] := RowLetter [XCoord];
+												Koncat (@s, @s2);
+												Koncat (@s, IntToStr (YCoord, 1, false));
+											end;
+										i := i+1; j := j+1; labelI := not labelI;
+									end;
+							if s <> '' then
+								AddString;
+							s := '%EndGame';
+							AddString;
+						end {%Game}
+					else if dType = DocJoseki then
+						begin {'%Joseki'}
+							s := '%Joseki ';
+							WriteHeader;
+							
+							nTreeNodes := 0;
+							
+							if gJosekiTree <> nil then
+								begin
+									s := '  ';
+									WriteJosekiTree (gJosekiTree);
+									if s <> '' then
+										AddString;
+								end;
+							
+							s := '%EndJoseki';
+							AddString;
+						end {'%Joseki'}
+					else if dType = DocProblem then
+						begin {'%Problem'}
+							s := '%Problem';
+							AddString;
+							{ xxx support Problems }
+							s := '%EndProblem';
+							AddString;
+						end; {'%Problem'}
+					err := 0;
+					WriteGODoc := fText;
+				end;
+		end; {WriteGODoc}
+		
+{$S ARes}
+function IsInCorner (corn, x, y, thresh: integer): Boolean;
+	begin
+		{$IFC TraceJoseki}
+		writeln ('in IsInCorner corn: ', corn:1, ' ', x: 1, ' ', y:1, ' thresh ', thresh:1);
+		{$ENDC}
+		case corn of
+			TpRtCorner:
+				IsInCorner := (x >= thresh) and (y >= thresh);
+			TpLfCorner:
+				IsInCorner := (x <= thresh) and (y >= thresh);
+			BtLfCorner:
+				IsInCorner := (x <= thresh) and (y <= thresh);
+			BtRtCorner:
+				IsInCorner := (x >= thresh) and (y <= thresh);
+		end; {case corn}
+	end; {IsInCorner}
+
+procedure MakeJosekiMove (pDoc: p2DocInfo; placePoint: p2GOPoint;
+				var JTree: TJosekiControl; 
+				corn: integer; isReflect: Boolean);
+	var
+		NextOnTree: 	p2TreeNode; { really a p2JosekiTreeNode }
+		InCorner: 		Boolean;
+		Threshold:		integer;
+		NewX, NewY: 	integer;
+	begin
+		NextOnTree := nil;
+		with JTree do
+			if JosekiState <> OffTree then
+				begin
+					if placePoint = nil then { A Pass}
+						begin
+							InCorner := false;
+							NextOnTree := FindChild (@JosekiTree^.tree, 0, 0);
+						end
+					else if placePoint^.XCoord = 0 then { Also a Pass}
+						begin
+							InCorner := false;
+							NextOnTree := FindChild (@JosekiTree^.tree, 0, 0);
+						end
+					else { not a pass} 
+						with pDoc^, placePoint^ do
+							begin
+								case dBoardSize of
+									9:		Threshold := 6;
+									19:	Threshold := 8;
+									otherwise
+											Threshold := dMidPt;
+								end; {cases}
+								InCorner := IsInCorner (corn, XCoord, YCoord, Threshold);
+								if InCorner then
+									begin
+										if JosekiTransform (pDoc, isReflect, corn,
+												XCoord, YCoord, NewX, NewY) then
+											begin
+												{$IFC TraceJoseki}
+												writeln (' InCorner corn: ', corn:1, 
+														' Threshold: ', Threshold:1,
+														' point coords: ', XCoord:1, ', ', YCoord:1,
+														' Joseki coords: ', NewX:1, ', ', NewY:1);
+												{$ENDC}
+												NextOnTree := FindChild (@JosekiTree^.tree, NewX, NewY);
+											end;
+									end
+								else
+									NextOnTree := FindChild (@JosekiTree^.tree, 0, 0); { "Tenuki" }
+							end;
+					case JosekiState of
+						AtBegin: 
+							if InCorner then
+								begin
+									if NextOnTree = nil then
+										begin
+											JosekiState := OffTree;
+											JosekiTree := nil;
+											prevJosekiTree := nil;
+										end
+									else
+										with pDoc^ do
+											begin
+												JosekiState := OnCurr;
+												if dBlackToPlay then
+													FirstMove := BlackOcc
+												else
+													FirstMove := WhiteOcc;
+												JosekiTree := p2JosekiTreeNode (NextOnTree);
+												prevJosekiTree := nil;
+											end;
+								end;
+						OnCurr:
+							if InCorner then
+								begin
+									if NextOnTree = nil then
+										begin
+											JosekiState := OffTree;
+											JosekiTree := nil;
+										end
+									else
+										JosekiTree := p2JosekiTreeNode (NextOnTree);
+									prevJosekiTree := nil;
+								end
+							else { not InCorner }
+								begin
+									if NextOnTree = nil then
+										begin
+											JosekiState := OffCurr;
+											prevJosekiTree := JosekiTree;
+											JosekiTree := @gEmptyTree; { place holder }
+										end
+									else
+										begin
+											JosekiState := BelowCurr;
+											prevJosekiTree := JosekiTree;
+											JosekiTree := p2JosekiTreeNode (NextOnTree);
+										end;
+								end;
+						BelowCurr:
+							if InCorner then
+								begin
+									if NextOnTree = nil then
+										begin
+											JosekiState := OffTree;
+											JosekiTree := nil;
+											prevJosekiTree := nil;
+										end
+									else
+										begin
+											JosekiState := OnCurr;
+											JosekiTree := p2JosekiTreeNode (NextOnTree);
+											prevJosekiTree := nil;
+										end;
+								end
+							else { not InCorner }
+								begin { double "Tenuki" -- backup one, sect OnCurr }
+									JosekiState := OnCurr;
+									JosekiTree := prevJosekiTree;
+									prevJosekiTree := nil;
+								end;
+						OffCurr:
+							{ xxx could share code with BelowCurr: }
+							{  NextOnTree will always be nil, }
+							{  since "place holder" node has no descendents. }
+							if InCorner then
+								begin
+									JosekiState := OffTree;
+									JosekiTree := nil;
+									prevJosekiTree := nil;
+								end
+							else { not InCorner }
+								begin { double "Tenuki" -- backup one, sect OnCurr }
+									JosekiState := OnCurr;
+									JosekiTree := prevJosekiTree;
+									prevJosekiTree := nil;
+								end;
+					end; {case JosekiState}
+				end;
+	end; {MakeJosekiMove}
+
+{$S AReadFile}
+function ReadGODoc (gH: p2GOAbstHier; fText: Handle; numChars: longint; 
+		function SetSize (pAbsH: p2GOAbstHier; nLine, hand: integer): p2GOAbstHier): integer;
+	{ ReadGODoc return values: }
+	{ 0		No Error. }
+	{ 1		no '%GO' header. }
+	{ 2		not version '1'. }
+	{ 3		no '%Terms' for Game. }
+	{ 4		expected integer handicap value. }
+	{ 5		handicap type not "Stones" "Komi" or "Passes". }
+	{ 6		no '%Size'. }
+	{ 7		'%Size' value is not 9, 11, 13, or 19 for Game. }
+	{ 8		Japanese rules not allowed with "Passes" handicap. }
+	{ 9		Chinese rules not allowed with "Stones" handicap. }
+	{ 10	'%Rules' value not 'Japanese' or 'Chinese'. }
+	{ 11	Move number is incorrect. }
+	{ 12	Bad Column, "A" - "T" expected. }	
+	{ 13	Bad Column, bigger than dBoard size. }	
+	{ 14	Bad Row, integer expected. }	
+	{ 15	Bad Row, bigger than dBoard size. }	
+	{ 16	Bad Move (100's is the PlaceMove code). }	
+	{ 92  bad tree: unknown <value> }
+	{ 93	bad tree: missing ')' }
+	{ 94	bad tree: two node labels }
+	{ 95	no '%EndJoseki'. }
+	{ 96	bad tree: extra ')' }
+	{ 97	no '%EndDiagram'. }
+	{ 98	not a Game, Problem, or Joseki. }
+	{ 99	no '%EndGame'. }
+		label
+			99; {exit ReadGODoc, with HUnlock call.}
+		var
+			nextChar: Ptr;
+			cState: nState;			{ result of StrToInt conversion }
+			ch: char;					{ used in decoding moves }
+			col, row: integer;		{ ditto }
+			val: TJosekiValue;		{ ditto }
+			len: integer;
+			done: Boolean;
+			pt: Point;
+			err: integer;
+			changePt: p2GOPoint;
+			
+			tempDate: str255;
+			tempPlace: str255;
+			tempType: TDocType;
+			tempTitle: str255;
+			tempWhitePlayer: TDocStr;
+			tempBlackPlayer: TDocStr;
+			tempGameRules: TGameRules;
+			tempGameTerms: TGameTerms;
+			tempNumHandicap: integer;
+			tempBoardSize: integer;
+			
+		procedure ReadHeader;
+			begin
+				GetOptString;
+				tempTitle := TokStr;
+				GetToken;
+				if EqStrCst (StringPtr (@TokStr), '%White') then
+					begin
+						GetOptString;
+						tempWhitePlayer := TokStr;
+						{ xxx later, support ranks. }
+						GetToken;
+					end
+				else
+					tempWhitePlayer := DefaultWhitePlayer;
+				if EqStrCst (StringPtr (@TokStr), '%Black') then
+					begin
+						GetOptString;
+						tempBlackPlayer := TokStr;
+						{ xxx later, support ranks. }
+						GetToken;
+					end
+				else
+					tempBlackPlayer := DefaultBlackPlayer;
+				tempGameRules := UnknRules;
+				if not EqStrCst (StringPtr (@TokStr), '%Terms') then
+					begin
+						ReadGODoc := 3; { no '%Terms' for Game }
+						goto 99;
+					end
+				else
+					begin {%Terms}
+						GetToken;
+						if EqStrCst (StringPtr (@TokStr), 'Even') then
+							begin
+								tempGameTerms := EvenGame;
+								tempNumHandicap := 0;
+								GetToken;
+							end
+						else if TokVal = 0 then
+							begin
+								ReadGODoc := 4; { expected integer handicap value }
+								goto 99;
+							end
+						else
+							begin {integer handicaps}
+								tempNumHandicap := TokVal;
+								GetToken;
+								if EqStrCst (StringPtr (@TokStr), 'Stones') then
+									begin
+										tempGameRules := JapaneseRules;
+										tempGameTerms := StonesHandicap;
+									end
+								else if EqStrCst (StringPtr (@TokStr), 'Komi') then
+									tempGameTerms := KomiHandicap
+								else if EqStrCst (StringPtr (@TokStr), 'Passes') then
+									begin
+										tempGameRules := ChineseRules;
+										tempGameTerms := PassesHandicap;
+									end
+								else
+									begin
+										ReadGODoc := 5; { handicap type not "Stones" "Komi" or "Passes" }
+										goto 99;
+									end;
+								GetToken;
+							end; {integer handicaps}
+					end; {%Terms}
+				if not EqStrCst (StringPtr (@TokStr), '%Size') then
+					begin
+						ReadGODoc := 6; { no '%Size' }
+						goto 99;
+					end
+				else
+					begin
+						GetToken;
+						if DebugTokens then
+							case TokVal of
+								 9: writeln ('SetUpGOBoard (9)');
+								11: writeln ('SetUpGOBoard (11)');
+								13: writeln ('SetUpGOBoard (13)');
+								19: writeln ('SetUpGOBoard (19)');
+								otherwise
+									 writeln ('*** Bad Board size: ', TokVal:1);
+							end;
+						case TokVal of
+							 9, 11, 13, 19: ;
+							otherwise
+								begin
+									ReadGODoc := 7; 
+										{ '%Size' value is not 9, 11, 13, or 19 for Game }
+									goto 99;
+								end;
+						end;
+						tempBoardSize := TokVal;
+						GetToken;
+						if EqStrCst (StringPtr (@TokStr), '%Rules') then
+							begin
+								GetToken;
+								if EqStrCst (StringPtr (@TokStr), 'Japanese') then
+									begin
+										if tempGameRules = UnknRules then
+											tempGameRules := JapaneseRules
+										else if tempGameRules <> JapaneseRules then
+											begin { only one way to get here: }
+												ReadGODoc := 8; 
+													{ Japanese rules not allowed with "Passes" handicap. }
+												goto 99;
+											end;
+										GetToken;
+									end
+								else if EqStrCst (StringPtr (@TokStr), 'Chinese') then
+									begin
+										if tempGameRules = UnknRules then
+											tempGameRules := ChineseRules
+										else if tempGameRules <> ChineseRules then
+											begin { only one way to get here: }
+												ReadGODoc := 9; 
+													{ Chinese rules not allowed with "Stones" handicap. }
+												goto 99;
+											end;
+										GetToken;
+									end
+								else
+									begin
+											ReadGODoc := 10; 
+												{ '%Rules' value not 'Japanese' or 'Chinese'. }
+											goto 99;
+									end;
+							end
+						else
+							if tempGameRules = UnknRules then
+								tempGameRules := JapaneseRules;
+					end;
+					
+				if tempGameTerms = StonesHandicap then
+					gH := SetSize (gH, tempBoardSize, tempNumHandicap)
+				else
+					gH := SetSize (gH, tempBoardSize, 0);
+					
+				with gH^, DocumentInfo do
+					begin
+						(* *** can now assume:
+						dFormat := 1;
+						dNumHandicap := tempNumHandicap;
+						dBoardSize: tempBoardSize;
+						*** *)
+						
+						dType := tempType; {game or Joseki}
+						dDate := tempDate;
+						dPlace := tempPlace;
+						dTitle := tempTitle;
+						dWhitePlayer := tempWhitePlayer;
+						dBlackPlayer := tempBlackPlayer;
+						dGameRules := tempGameRules;
+						dGameTerms := tempGameTerms;
+					end;
+					
+			end; {ReadHeader}
+		
+		function ReadValue (var val: TJosekiValue) : integer;
+			label 99; {exit}
+			begin
+				GetToken;
+				if TokStr = 'bad' then
+					begin
+						val := BadJosekiMove;
+						GetToken;
+						if TokStr = ']' then
+							GetToken
+						else
+							begin
+								ReadValue := 91;
+									{ bad tree: missing ']'. }
+								goto 99;
+							end;
+					end
+				else
+					begin
+						ReadValue := 92;
+							{ bad tree: unknown <value>. }
+						goto 99;
+					end;
+				ReadValue := 0; { everything O.K. }
+			99:
+			end; {ReadValue}
+			
+		function ReadMove (var row, col: integer; var val: TJosekiValue): integer;
+			{ returns same condition codes as ReadGODoc }
+			label
+				13, { bad column }
+				99; {exit}
+			var
+				len: integer;
+				ch: char;
+			begin
+				ReadMove := 0; { be optimistic }
+				len := length (TokStr);
+				if len <> 1 then
+					if TokStr = 'pass' then
+						begin
+							row := 0; col := 0;
+							GetToken;
+							if TokStr = '[' then
+								ReadMove := ReadValue (val)
+							else
+								val := GoodJosekiMove; 	{ default }
+							goto 99;
+						end
+					else
+						begin
+						13:
+							ReadMove := 12;
+								{ Bad Column, "A" - "T" expected. }
+							goto 99;
+						end;
+				ch := UpCh (TokStr[1]);
+				if (ch < 'A') or ('T' < ch) then
+					GOTO 13;
+				if ch < 'I' then
+					col := ord(ch) - ord('A') + 1
+				else
+					col := ord(ch) - ord('A');
+				with gH^, DocumentInfo do
+					begin
+						if col > dBoardSize then
+							begin
+								ReadMove := 13;
+									{ Bad Column, bigger than dBoard size. }
+								goto 99;
+							end;
+						GetToken;
+						if TokVal = 0 then
+							begin
+								ReadMove := 14;
+									{ Bad Row, integer expected. }
+								goto 99;
+							end;
+						if TokVal > dBoardSize then
+							begin
+								ReadMove := 15;
+									{ Bad Row, bigger than dBoard size. }
+								goto 99;
+							end;
+					end;
+				row := TokVal;
+				GetToken;
+				if TokStr = '[' then
+					ReadMove := ReadValue (val)
+				else
+					val := GoodJosekiMove; 	{ default }
+		99:
+			end; {ReadMove}
+			
+		function ReadTree: p2JosekiTreeNode;
+			{ Read a tree, enclosed in parentheses }
+			label 99;
+			var root: p2TreeNode; { really a p2JosekiTreeNode }
+				child: p2JosekiTreeNode; err: integer;
+			begin
+				ReadTree := nil;
+				root := nil;
+
+				if EqStrCst (StringPtr (@TokStr), '(') then
+					begin
+						GetToken; { skip '(' }
+						err := ReadMove (row, col, val);
+						if err = 0 then { allow root, no move }
+							with gH^, DocumentInfo do
+								begin
+									if (col = 0) or (row = 0) then
+										NewMoveTreeNode (@StringGraph, root, nil)
+									else
+										NewMoveTreeNode (@StringGraph, root, @dBoard [col, row]);
+									with p2JosekiTreeNode(root)^ do
+										begin
+											value := val;
+											conditions := nil;
+										end;
+								end
+						else
+							begin
+								ReadGODoc := err; { bad tree: missing ')' }
+								GOTO 99;
+							end;
+						while EqStrCst (StringPtr (@TokStr), '(') do
+							begin
+								child := ReadTree;
+								if child = nil then
+									GOTO 99;
+								AddChild (root, p2TreeNode(child));
+							end;
+						if EqStrCst (StringPtr (@TokStr), ')') then
+							GetToken
+						else
+							begin
+								ReadGODoc := 93; { bad tree: missing ')' }
+								GOTO 99;
+							end;
+					end; { '(' }
+				ReadTree := p2JosekiTreeNode (root);
+		99:
+			end; {ReadTree}
+			
+		var
+			parentStack: p2ListItem;
+			curParent, tempTree:  p2JosekiTreeNode;
+
+		procedure CallMakeJosekiMove (var JTree: TJosekiControl; 
+					corn: integer; isReflect: Boolean);
+			begin
+				with gH^ do
+					MakeJosekiMove (@DocumentInfo, changePt, JTree, corn, isReflect);
+			end; {CallMakeJosekiMove}
+
+		begin {ReadGODoc}
+			(* Assertion: gH = nil (or old board) at this point. *)
+			(* Must cache info until setup parameters are known. *)
+
+			HLock (fText);
+			nextChar := fText^;
+			TokPtr := Ptr(BAnd (ord4(fText^), $00FFFFFF)); 
+			TokEnd := Ptr(ord4(TokPtr)+numChars);
+			GetToken;
+			if not EqStrCst (@TokStr, '%GO') then
+				begin
+					ReadGODoc := 1; { no '%GO' header }
+					goto 99;
+				end;
+			GetToken;
+			if TokStr <> '1' then
+				begin
+					ReadGODoc := 2; { not version '1' }
+					goto 99;
+				end;
+			GetToken;
+			if EqStrCst (StringPtr (@TokStr), '%Date') then
+				begin
+					GetOptString;
+					tempDate := TokStr;
+					GetToken;
+				end
+			else
+				tempDate := '';
+			if EqStrCst (StringPtr (@TokStr), '%Place') then
+				begin
+					GetOptString;
+					tempPlace := TokStr;
+					GetToken;
+				end
+			else
+				tempPlace := '';
+			if EqStrCst (StringPtr (@TokStr), '%Game') then
+				begin {'%Game'}
+					tempType := DocGame;
+					ReadHeader;
+					
+					with gH^, DocumentInfo do
+						begin
+							done := false;
+							while not done do
+								begin
+									if TokStr[1] <> '%' then
+										begin
+											len := length (TokStr);
+											if TokStr [len] = '.' then { move number }
+												begin
+													TokStr [0] := chr(len-1);
+													TokVal := StrToInt (@TokStr, cState);
+													if TokVal <> dNextMove - dNumHandicap  then
+														if (dNumHandicap = 0) or (TokVal <> dNextMove - dNumHandicap+1) then
+														{ second test allows for "old" handicap conventions: }
+														{ first White move was numbered 2. }
+														{ xxx is it a bug that stone "numbers" are in file?? }
+															begin
+																ReadGODoc := 11; 
+																	{ Move number is incorrect. }
+																goto 99;
+															end;
+													GetToken;
+													len := length (TokStr);
+												end;
+											{ actual move }
+											err := ReadMove (row, col, val);
+											if err <> 0 then
+												begin
+													ReadGODoc := err;
+													goto 99;
+												end;
+											if (col = 0) or (row = 0) then
+												changePt := nil
+											else
+												changePt :=  @dBoard [col][row];
+											err := TryMakeMove (gH, pt, 
+												dReadyForGraphics and dWantGraphics,
+												changePt, true{placePoint known}, true {permanent});
+											if err <> 0 then 
+												begin
+													ReadGODoc := err*100+16;
+														{	Bad Move (100's is the PlaceMove code). }	
+													goto 99;
+												end;
+											if gJosekiTree <> nil then
+												EachJosekiMgr (@DocumentInfo, CallMakeJosekiMove);
+										end
+									else if EqStrCst (StringPtr (@TokStr), '%Diagram') then
+										begin
+											{ xxx later, support diagrams }
+											repeat
+												GetToken;
+											until EqStrCst (StringPtr (@TokStr), '%EndDiagram') or
+												(TokPtr = TokEnd);
+											if TokPtr = TokEnd then
+												begin
+													ReadGODoc := 97; { no '%EndDiagram' }
+													goto 99;
+												end;
+											GetToken;
+										end
+									else if EqStrCst (StringPtr (@TokStr), '%EndGame') then
+										done := true
+									else
+										begin
+											ReadGODoc := 99; { no '%EndGame' }
+											goto 99;
+										end;
+								end;
+								
+							{ xxx Later, support Commentary. }
+						end; {with gH^}
+
+				end  {'%Game'}
+			else if EqStrCst (StringPtr (@TokStr), '%Problem') then
+				begin
+					{ xxx later, allow problems. }
+					tempType := DocProblem;
+					GetToken;
+				end
+			else if EqStrCst (StringPtr (@TokStr), '%Joseki') then
+				begin {'%Joseki}
+					tempType := DocJoseki;
+					ReadHeader;
+					
+					with gH^, DocumentInfo do
+						begin
+		
+							if TokStr[1] <> '%' then
+								begin
+									gJosekiTree := ReadTree;
+									if gJosekiTree = nil then
+										goto 99;
+									dCurJoseki := gJosekiTree;
+								end;
+							
+							if TokStr[1] <> '%' then
+								begin
+									ReadGODoc := 95; { no '%EndJoseki' }
+									goto 99;
+								end
+							else if EqStrCst (StringPtr (@TokStr), '%Diagram') then
+								begin
+									{ xxx later, support diagrams }
+									repeat
+										GetToken;
+									until EqStrCst (StringPtr (@TokStr), '%EndDiagram') or
+										(TokPtr = TokEnd);
+									if TokPtr = TokEnd then
+										begin
+											ReadGODoc := 97; { no '%EndDiagram' }
+											goto 99;
+										end;
+									GetToken;
+								end
+							else if EqStrCst (StringPtr (@TokStr), '%EndJoseki') then
+								{done := true};
+						end; {with gH^}
+				end {'%Joseki'}
+			else
+				begin
+					ReadGODoc := 90; { not a Game, Problem, or Joseki. }
+					goto 99;
+				end;
+			ReadGODoc := 0; { no error }
+	99:
+			HUnLock (fText);
+		end; {ReadGODoc}
+		
+function ReadInput (var f: text; var numChars: longint; var fText: Handle): Boolean;
+	{ simulate a MacApp "Block Read" of entire text file }
+	var line: str255; len, err: integer;
+		endOfGame: Boolean;
+	begin
+		numChars := 0;
+		fText := NIL;
+		fText := NewHandle(0);
+		IF fText = NIL THEN
+			GOEngineError ('NewHandle returned NIL.', 0, 0);
+
+		endOfGame := false;
+		while not eof(f) and not endOfGame do
+			begin
+				readln (f,line);
+				len := length(line)+1;
+				line[len] := chr(13); {CR}
+				err := PtrAndHand (Ptr(ord4(@line)+1), fText, len);
+				if err <> noErr then
+					GOEngineError ('PtrAndHand returned error: ', err, 1);
+				numChars := numChars+len;
+				endOfGame := (line = '%EndGame') or (line = '%EndJoseki');
+			end;
+		ReadInput := endOfGame;
+	end; {ReadInput}

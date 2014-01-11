@@ -1,0 +1,43 @@
+UNIT Timers;
+
+INTERFACE
+	USES 
+		{$LOAD MacIntf.LOAD}
+			MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf;
+		{$LOAD}
+	
+
+	type 
+		PhaseTimeRec =
+			record
+				lastTime, minTime, maxTime, totalTime, count: longint;
+			end;
+			
+		TimedPhases = 
+			(StartPhase, UserPhase, AnalStrPhase, Class1Phase, KillSavPhase, Class2Phase,
+			 ChkChgPhase, GrpLifPhase, TacMovPhase, 
+			 JosMovPhase, CutConSPhase, ExtMovPhase, PickMovPhase, InvalPhase, StopPhase);
+			 
+	var
+		PhaseTimeRecs: array [StartPhase..StopPhase] of PhaseTimeRec;
+		
+	procedure InitializePhaseTimers;
+		{ called once, at startup time. }
+		{ does a SetPhaseTimer }
+		
+	procedure SetPhaseTimer;
+		{ called to "mark" the starting time of a new phase of execution. }
+		{ useful to indicate skipping some time. }
+	
+	procedure EndOfPhase (ph: TimedPhases);
+		{ records the time since SetPhaseTimer to "phase" }
+		{ keep track of min, max, and totals } 
+
+	procedure ReportPhaseTimers (var textFile: Text; summaryOnly: Boolean);
+		{ if summaryOnly is true, only a summary is printed }
+		{ otherwise complete table is printed }
+		{ can be called more than once to get "running" report }
+
+IMPLEMENTATION
+{$I Timers2.p}
+END.

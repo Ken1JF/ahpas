@@ -1,0 +1,2712 @@
+{ MacApp GO }
+{copyright © 1986-1988 by Ken Friedenbach}
+{all rights reserved}
+{Portions from MacApp copyright © 1986 by Apple Computer, Inc.}
+
+CONST
+{	-	-	-	-	-	-	-	Window resource IDs -	-	-	-	-	-	-	-	-	}
+
+	kBoardWindowID		=	1001;	
+	kGameWindowID		=	1002;	
+	kStyleWindowID		=	1003;	
+	kStringsWindowID 	=	1004;
+	kBlocksWindowID 	=	1005;
+	kGroupsWindowID 	=	1006;
+	kAreasWindowID 	=	1007;
+	
+	DebugWindowSize = false;
+	DebugChangeNumbers = false;
+	DebugCountPrisoners = false;
+
+{$IFC TraceStringKill}
+	TraceAnalysis = true;
+{$ELSEC}
+	TraceAnalysis = false;
+{$ENDC}
+
+{	-	-	-	-	-	-	-	Window size limits -	-	-	-	-	-	-	-	-	}
+
+	kGameHSize = 150;
+
+	kStaggerAmount		=	16; 	{Staggering for windows}
+	
+TYPE
+		{ -	-	-	-	- Resource Formats -	-	-	-	- }
+		
+	GODefPtr = ^GODefaults;
+	GODefHdl = ^GODefPtr;
+	GODefaults = record (* GOdf, ID =1 *)
+
+		{ -	-	-	-	- Resource Default Baord Parameters -	-	-	-	- }
+
+		rDefaultBoardSize:	integer;
+		rDefaultHandicap:		integer;
+		rDefaultBoxH:			integer;
+		rDefaultBoxV:			integer;
+		rDefaultLabels:		Boolean;
+		rDefaultNumbers:		Boolean;
+	end;
+
+
+VAR	
+		{ -	-	-	-	- I/O State -	-	-	-	- }
+
+	gQuitting: Boolean;
+	gErrorFlag: Boolean;
+	
+	gBoardStagger:	integer;
+	gGameStagger:		integer;
+	gStyleStagger:	integer;
+
+		{ -	-	-	-	- Cursors -	-	-	-	- }
+
+	gBlackCursHdl, gWhiteCursHdl: CursHandle;
+		
+		{ -	-	-	-	- Default Baord Parameters -	-	-	-	- }
+
+	gDefaultBoardSize:	integer;
+	gDefaultHandicap:		integer;
+	gDefaultBoxH:			integer;
+	gDefaultBoxV:			integer;
+	gDefaultLabels:		Boolean;
+	gDefaultNumbers:		Boolean;
+	
+	gDefaultBoardX:		integer;
+	gDefaultBoardY:		integer;
+	
+		{ -	-	-	-	- Joseki Document -	-	-	-	- }
+	
+	gJosekiDocument:		p2DocInfo;
+	p2TestJoseki: p2GOAbstHier; { hidden document that is read as default Joseki }
+
+{$S ANonRes}
+{$IFC qTrace}{$D++}{$ENDC}
+
+PROCEDURE TGODocument.ResizeBoardWindow (size: integer);
+	VAR p: Point; boardHSize, boardVSize: integer; 
+		R:  Rect;
+	BEGIN
+		if fdAbstHier <> NIL then
+			with fdAbstHier^.DocumentInfo do
+				begin
+					dBoardSize := size; 
+					boardHSize := size*dBoxH + 2*dHorOffset;
+					boardVSize := size*dBoxV + 2*dVerOffset;
+					{$H-}
+					SetRect (fdBoardInterior, 0, 0, boardHSize, boardVSize);
+					{$H+}
+					if DebugWindowSize then
+						begin
+							writeln('TGODocument.ResizeBoardWindow: set fdBoardInterior');
+							writeln ('   to boardHSize, boardVSize = ',
+								boardHSize:1, ', ', boardVSize:1);
+						end;
+					p.v := boardVSize;
+					p.h := boardHSize;
+					if fdBoardWindow <> nil then
+						begin
+							fdBoardWindow.Resize (p, true);
+							if DebugWindowSize then
+								begin
+									writeln('TGODocument.ResizeBoardWindow: called fdBoardWindow.Resize');
+									writeln ('   with boardHSize, boardVSize = ',
+										boardHSize:1, ', ', boardVSize:1);
+								end;
+						end;
+
+					if fdBoardView <> nil then
+						begin
+							R := fdBoardInterior;
+							fdBoardView.SetExtent (R);
+							if DebugWindowSize then
+								begin
+									writeln('TGODocument.ResizeBoardWindow: called fdBoardView.SetExtent');
+									writeln ('   with boardHSize, boardVSize = ',
+										boardHSize:1, ', ', boardVSize:1);
+								end;
+							if dReadyForGraphics and dWantGraphics then
+								if fdBoardView.fFrame <> NIL then
+									begin
+										R := fdBoardInterior;
+										fdBoardView.fFrame.InvalidRect (R);
+										(* InvalRect (fdBoardInterior); *)
+										if DebugWindowSize then
+											begin
+												writeln('TGODocument.ResizeBoardWindow: called InvalRect');
+												writeln ('   with boardHSize, boardVSize = ',
+													boardHSize:1, ', ', boardVSize:1);
+											end;
+									end;
+						end;
+					
+					{$IFC DebugDraw}
+					R := fdBoardInterior;
+					if fdStringsView <> nil then
+						fdStringsView.SetExtent (R);
+					if fdBlocksView <> nil then
+						fdBlocksView.SetExtent (R);
+					if fdGroupsView <> nil then
+						fdGroupsView.SetExtent (R);
+					if fdAreasView <> nil then
+						fdAreasView.SetExtent (R);
+					{$ENDC}
+						
+					{$H-}
+					InsetRect (fdBoardInterior, 4{dHorOffset}, 4{dVerOffset});
+					{$H+}
+				end;
+	END; {ResizeBoardWindow}
+	
+{$S ANonRes}
+FUNCTION HandicapFilter (theDialog: DialogPtr; VAR theEvent: EventRecord;
+		VAR itemHit: INTEGER): BOOLEAN;
+	begin
+	end; {HandicapFilter}
+	
+{$S ANonRes}
+PROCEDURE HandicapDialog;
+	const
+		HandicapDLOG = 1301;
+		okButton = 11; cancelButton = 12;
+	var
+		itemHit : integer;
+		pDialog : DialogPtr; 
+	begin
+		{ dStorage := nil; }
+		pDialog := GetNewDialog (HandicapDLOG, nil, WindowPtr(-1));
+		
+		{set the dialog parameters to reflect current state.}
+		
+		SetCursor(arrow);
+		{repeat }
+			{ModalDialog(HandicapFilter, itemHit)}
+		{until (itemHit = okButton) or (itemHit = okButton);}
+		
+		DisposDialog (pDialog);
+		{ xx CloseDialog (pDialog); }
+	end; {HandicapDialog}
+
+				{	-	-	-	-	-	Method Implementations	-	-	-	-	-	}
+
+		{	-	-	-	-	- TGOApplication -	-	-	-	}
+		
+{$S ANonRes}
+PROCEDURE CalcDefaults;
+	BEGIN
+		gDefaultBoardX := gDefaultBoxH*gDefaultBoardSize + 2*4{dHorOffset};
+		gDefaultBoardY := gDefaultBoxV*gDefaultBoardSize + 2*4{dVerOffset};
+		if gDefaultLabels then
+			begin
+				gDefaultBoardX := gDefaultBoardX + 2*gDefaultBoxH;
+				gDefaultBoardY := gDefaultBoardY + 2*gDefaultBoxV;
+			end;		
+	END; {CalcDefaults}
+
+{$S AInit}
+PROCEDURE TGOApplication.IGOApplication;
+	VAR
+		fText: Handle;
+		numChars: longint;
+		
+	function ReadBrdSize (pAbsH: p2GOAbstHier; nLine, hand: integer): p2GOAbstHier;
+		BEGIN
+			p2TestJoseki := pAbsH;
+			p2TestJoseki := SetUpGOBoard (p2TestJoseki, nline, hand, false); 
+			ReadBrdSize := p2TestJoseki;
+		END; {ReadBrdSize}
+
+	VAR
+		defHdl: GODefHdl;
+		JosekiFile: text;
+		err: integer;
+	BEGIN
+			
+		IApplication (kDocKind);
+		InitCursorCtl (nil);
+			{ initialize the global state }
+		gBoardStagger := 0;
+		gGameStagger 	:= 0;
+		gStyleStagger := 0;
+
+		gQuitting := false;
+		gErrorFlag := false;
+		
+		{$IFC TraceAbst}
+		gTraceUpdate := false;
+		AbstIndent := 1;
+		{$ENDC}
+		
+		gJosekiTree := nil;
+		
+		p2TestJoseki := nil;
+
+		gNoLineLayout := gConfiguration.hasROM128K;
+		{ xxx later: option for user to shut off? }
+		
+		{$IFC TraceStringKill}
+		TraceIndent := 1;
+		{$ENDC}
+		
+		LastInvalidationCleanUp := 0;
+
+			{ Load the Cursors for tracking Black and White moves }
+		
+		gBlackCursHdl := GetCursor (BlackCursor);
+		FailNil (gBlackCursHdl);
+		HNoPurge (Handle(gBlackCursHdl));
+		gWhiteCursHdl := GetCursor (WhiteCursor);
+		FailNil (gWhiteCursHdl);
+		HNoPurge (Handle(gWhiteCursHdl));
+		
+		gJosekiDocument := nil;
+		with gEmptyTree do
+			begin
+				TreeMoveX := 0;
+				TreeMoveY := 0;
+				FirstContinuation := nil;
+				NextAlternative := nil;
+			end;
+		
+			{ Get the Default Settings: }
+			
+		defHdl := GODefHdl (GetResource ('GOdf',1));
+		FailNil (defHdl);
+		with defHdl ^^ do
+			begin
+				gDefaultBoardSize := rDefaultBoardSize;
+				gDefaultHandicap := rDefaultHandicap;
+				gDefaultBoxH := rDefaultBoxH;
+				gDefaultBoxV := rDefaultBoxV;
+				gDefaultLabels := rDefaultLabels;
+				gDefaultNumbers := rDefaultNumbers;
+			end;
+		ReleaseResource (Handle(defHdl));
+			
+		CalcDefaults;
+		
+		{$IFC DoTimers}
+		InitializePhaseTimers;
+		{$ENDC}
+		
+		{ Get the Default Joseki dictionary }
+
+		p2TestJoseki := SetUpGOBoard (p2TestJoseki, 19, 0, false);
+		
+		{$IFC DoTimers}
+		EndOfPhase (StartPhase);
+		{$ENDC}
+		
+		Reset (JosekiFile, ':Basic Joseki');
+		err := IOResult;
+		if err = 0 then
+			begin
+				if ReadInput (JosekiFile, numChars, fText) then
+					begin
+						err :=  ReadGODoc (p2TestJoseki, fText, numChars, ReadBrdSize);
+						
+						if err <> 0 then
+							GOEngineError ('Error reading ":Basic Joseki" dictionary.', err, 1);
+							
+						SetHandleSize(fText, 0);
+					end
+				else
+					GOEngineError ('Bad ":Basic Joseki" dictionary.', 0, 0);
+				{$IFC DoTimers}
+				EndOfPhase (StartPhase);
+				{$ENDC}
+			end
+		else
+			GOEngineError ('Can''t find ":Basic Joseki" dictionary.', err, 1);
+	END; {TGOApplication.IGOApplication}
+
+
+{$S AOpen}
+FUNCTION  TGOApplication.DoMakeDocument (itsCmdNumber: CmdNumber): TDocument;
+			OVERRIDE;
+	VAR aGODocument:	TGODocument;
+	BEGIN
+		New (aGODocument);
+		FailNil (aGODocument);
+		aGODocument.IGODocument; 
+		DoMakeDocument := aGODocument;
+	END; {TGOApplication.DoMakeDocument}
+
+
+{$IFC qDebug}
+{$S ADebug}
+PROCEDURE TGOApplication.IdentifySoftware; OVERRIDE;
+	BEGIN
+		WriteLn('GO Source date: January 14, 1986; Compiled on: ', COMPDATE, ' @ ', COMPTIME);
+		(* gConfReceiver.IdentifySoftware;  {will identify UAppleTalk version} *)
+		INHERITED IdentifySoftware;
+	END; {TGOApplication.IdentifySoftware}
+{$ENDC}
+
+
+		{	-	-	-	-	- TGODocument -	-	-	-	}
+{$S AOpen}
+PROCEDURE TGODocument.IGODocument;
+	BEGIN
+
+		IDocument (
+			kDocKind, 
+			kSignature, 
+			kUsesDataFork, 			{ read/write the data fork }
+			NOT kUsesRsrcFork, 	{ xxx save display state in the rsrc fork }
+			NOT kDataOpen, 			{ do not keep the data fork open }
+			NOT kRsrcOpen); 		{ do not keep the rsrc fork open }
+			
+		fdAbstHier 		:= NIL;
+	
+		fdBoardWindow := NIL;
+		fdBoardView 	:= NIL;
+
+		{$IFC DebugDraw}
+		fdStringsWindow := NIL;
+		fdStringsView := NIL;
+		
+		fdBlocksWindow := NIL;
+		fdBlocksView := NIL;
+
+		fdGroupsWindow := NIL;
+		fdGroupsView := NIL;
+
+		fdAreasWindow := NIL;
+		fdAreasView := NIL;
+		{$ENDC}
+		
+		fdGameWindow 	:= NIL;
+		fdGameView 		:= NIL;
+		
+		fdStyleWindow := NIL;
+		fdStyleDialog := NIL;
+				
+		fReadyForDebugDrawing := FALSE;
+
+		{$IFC TraceAbst}
+		gTraceUpdate := false;		
+		{$ENDC}
+		
+		with fdDisplayState do
+			begin
+			
+				with GameState do
+					begin
+						GameType := HumanHuman;
+						Playing := true;
+					end;
+					
+					{ xxx better defaults? }
+				BoardLoc.h := 0;
+				BoardLoc.v := 0;
+
+				GameShows := TRUE;
+				GameLoc.h := BoardLoc.h + gDefaultBoardX;
+				GameLoc.v := BoardLoc.v;
+				GameScrollPos := 0;
+
+				{$H-}				
+				SetRect (GamePort,0,0,0,0);
+				{$H+}
+	
+				StyleShows := FALSE;
+				StyleLoc.h := BoardLoc.h + gDefaultBoardY;
+				StyleLoc.v := BoardLoc.v;
+			end;
+			
+		fdReopening := FALSE;
+		
+		fdShowStrings := FALSE;
+		fdShowBlocks := FALSE;
+		fdShowGroups := FALSE;
+		fdShowAreas := FALSE;
+		
+		fdTextHandle := NIL;
+		
+		fdWaitingForUser := true;
+		
+			{ inherited fields: }
+		
+		fSavePrintInfo := FALSE;
+		fIdlePriority := 10; { some room to barter? }
+				
+		{$H-}
+		SetRect 	(fdBoardInterior, 0, 0, gDefaultBoardX, gDefaultBoardY);
+		if DebugWindowSize then
+			begin
+				writeln('TGODocument.IGODocument: called SetRect 	(fdBoardInterior');
+				writeln ('   with gDefaultBoardX, gDefaultBoardY = ',
+					gDefaultBoardX:1, ', ', gDefaultBoardY:1);
+			end;
+		InsetRect (fdBoardInterior, 4{dHorOffset}, 4{dVerOffset});
+		{$H+}
+			
+		{ from StringKill.p Not initialized: }
+		DameToSave := 3;
+	END; {TGODocument.IGODocument}
+
+{$S AWriteFile}
+PROCEDURE TGODocument.DoNeedDiskSpace 
+		(VAR dataForkBytes, rsrcForkBytes: LONGINT); OVERRIDE;
+	BEGIN
+		INHERITED DoNeedDiskSpace (dataForkBytes, rsrcForkBytes);
+		{ xxx later, reduce to twice the size of a complete 19x19 game. }
+		{ xxx or: compute it. }
+		dataForkBytes :=  dataForkBytes + 30000; { should be enough, should be available. }
+	END; { TGODocument.DoNeedDiskSpace }
+
+
+{$S AWriteFile}
+PROCEDURE TGODocument.DoWrite
+		(aRefNum: INTEGER; makingCopy: BOOLEAN); OVERRIDE;
+	VAR numChars:		LONGINT;
+			err: integer;
+	BEGIN
+		{ build the chars}
+		with fdAbstHier^ do
+			fdTextHandle := WriteGODoc (@DocumentInfo, err, numChars);
+		
+		if err <> 0 then
+			Failure (err, 8000);
+	
+		numChars := GetHandleSize (fdTextHandle);
+		FailOSErr (FSWrite(aRefNum, numChars, fdTextHandle^));
+		
+		SetHandleSize (fdTextHandle, 0);
+		FailMemError;
+
+		DisposHandle (fdTextHandle);
+		FailMemError;
+		fdTextHandle := nil;
+
+	END; {TGODocument.DoWrite}
+
+
+{$S AClose}
+PROCEDURE TGODocument.Free; OVERRIDE;
+	BEGIN
+		if fdAbstHier <> NIL then
+			ClearAbstHier (fdAbstHier);
+		DisposPtr (Ptr(fdAbstHier));
+		
+		INHERITED Free;
+	END; {TGODocument.Free}
+
+{$S AReadFile}
+PROCEDURE TGODocument.DoInitialState; OVERRIDE;
+	{ Called:
+			when the New Command is chosen, 
+			when Revert is chosen, and there is no saved document,
+			and when the application icon is opened. }
+	BEGIN
+		{Setup Default Board}
+		fdAbstHier := SetUpGOBoard (fdAbstHier, gDefaultBoardSize, gDefaultHandicap, 
+				false);
+		with fdAbstHier^.DocumentInfo do
+			begin
+				dReadyForGraphics := true;
+				dWantGraphics := true;
+			end;
+		ResizeBoardWindow (gDefaultBoardSize);
+
+	END; {TGODocument.DoInitialState}
+
+
+{$S AOpen}
+PROCEDURE TGODocument.DoMakeViews (forPrinting: BOOLEAN); OVERRIDE;
+		VAR
+			aBoardView: TBoardView;
+			{$IFC DebugDraw}
+			aStringsView: TDebugView;
+			{$ENDC}
+			aGameView:	TGameView;
+			aStyleDialog:	TStyleDialog;
+	BEGIN
+		writeln ('In TGODocument.DoMakeViews, forPrinting = ', forPrinting);
+		new (aBoardView);
+		FailNil (aBoardView);
+		aBoardView.IBoardView (FALSE, SELF);
+		fdBoardView := aBoardView;
+		
+		IF NOT forPrinting THEN 
+			BEGIN
+				{$IFC DebugDraw}
+				New (aStringsView);	
+				FailNIL (aStringsView);	
+				aStringsView.IDebugView (FALSE, SELF, StringsDebugView);
+				fdStringsView := aStringsView;
+				
+				New (aStringsView);	
+				FailNIL (aStringsView);	
+				aStringsView.IDebugView (FALSE, SELF, BlocksDebugView);
+				fdBlocksView := aStringsView;
+
+				New (aStringsView);	
+				FailNIL (aStringsView);	
+				aStringsView.IDebugView (FALSE, SELF, GroupsDebugView);
+				fdGroupsView := aStringsView;
+
+				New (aStringsView);	
+				FailNIL (aStringsView);	
+				aStringsView.IDebugView (FALSE, SELF, AreasDebugView);
+				fdAreasView := aStringsView;
+				{$ENDC}
+		
+				New (aGameView);	
+				FailNIL (aGameView);	
+				aGameView.IGameView (FALSE, SELF);
+				fdGameView := aGameView;
+		
+				New (aStyleDialog);
+				FailNil (aStyleDialog);
+				aStyleDialog.IStyleDialog (SELF);
+				fdStyleDialog := aStyleDialog;
+			END;
+	END; {TGODocument.DoMakeViews}
+
+{$S AOpen}
+PROCEDURE CalcWindowRect (aWindow: TWindow; VAR itsGlobalRect: Rect);
+	{global screen coordinates, occupied by a window}
+	BEGIN
+		aWindow.Focus;
+		itsGlobalRect := aWindow.fWmgrWindow^.portRect;
+		LocalToGlobal(itsGlobalRect.topLeft);
+		LocalToGlobal(itsGlobalRect.botRight);
+	END; {CalcWindowRect}
+
+{$S ARes}
+PROCEDURE TGODocument.RedrawBoard;
+	{forces redraw of interior of board window only}
+	VAR
+		R: Rect;
+	BEGIN
+		R := fdBoardInterior;
+		fdBoardView.fFrame.InvalidRect (R);
+	END; {TGODocument.RedrawBoard}
+
+{$S ARes}	
+PROCEDURE TGODocument.WholeBoardChanged; 
+	{forces redraw of board and its other windows}
+	BEGIN
+		RedrawBoard;
+		(* xxx ***
+		if GameView shows then
+			somehow redraw;
+		*** *)
+	END; {TGODocument.WholeBoardChanged}
+
+
+{$S AOpen}
+PROCEDURE TGODocument.DoMakeWindows; OVERRIDE;
+	VAR wmgrWindow: 	WindowPtr;
+		isResizable:		BOOLEAN;
+		isClosable: 		BOOLEAN;
+		aFrame: 				TFrame;
+		aGameWindow:		TGameWindow;
+		newGameSize: 		Point;
+		buttonToSelect: INTEGER;
+		aWindowLoc: 		Point;
+		aRect:					Rect;
+		fi:							FailInfo;
+
+	PROCEDURE HdlFailure (error: OSErr; message: LONGINT);
+		BEGIN
+			IF aGameWindow = NIL THEN
+				DisposeWindow(wmgrWindow);
+		END; {HdlFailure}
+
+	BEGIN {TGODocument.DoMakeWindows}
+	
+			{ allocate the main (board) window }
+		fdBoardWindow := NewSimpleWindow (kBoardWindowID, 
+					not kDialogWindow, 
+					not kWantHScrollBar, not kWantVScrollBar, 
+					fdBoardView);
+			
+		{$IFC DebugDraw}
+			{ allocate the Strings and Boards windows }
+		fdStringsWindow := NewSimpleWindow (kStringsWindowID, 
+					not kDialogWindow, 
+					not kWantHScrollBar, not kWantVScrollBar, 
+					fdStringsView);
+		fdBlocksWindow := NewSimpleWindow (kBlocksWindowID, 
+					not kDialogWindow, 
+					not kWantHScrollBar, not kWantVScrollBar, 
+					fdBlocksView);
+		fdGroupsWindow := NewSimpleWindow (kGroupsWindowID, 
+					not kDialogWindow, 
+					not kWantHScrollBar, not kWantVScrollBar, 
+					fdGroupsView);
+		fdAreasWindow := NewSimpleWindow (kAreasWindowID, 
+					not kDialogWindow, 
+					not kWantHScrollBar, not kWantVScrollBar, 
+					fdAreasView);
+		{$ENDC}
+
+			{	allocate the text (game) window }
+		aGameWindow := NIL;
+		CatchFailures (fi, HdlFailure);
+		wmgrWindow := gApplication.GetRsrcWindow (NIL, kGameWindowID,
+					not kDialogWindow,
+					isResizable, isClosable);
+		FailNIL (wmgrWindow);
+		New (aGameWindow);
+		FailNil (aGameWindow);
+		fdGameWindow := aGameWindow;
+		aGameWindow.IGameWindow (wmgrWindow, SELF);
+		Success (fi);
+		
+			{	allocate the style window }
+		fdStyleWindow := fdStyleDialog.MakeOwnWindow (FALSE);
+		FailNil(fdStyleWindow);
+		WITH fdStyleWindow DO
+			BEGIN
+				fOpenInitially := FALSE;
+				fWouldCloseDoc := FALSE;
+				fFreeOnClosing := FALSE;
+			END;
+
+				{ xxx support some "real" buttons }
+				{ See Puzzle.incl.p "radio" buttons }
+
+				{ calculate (preliminary) position of Board window }
+		CalcWindowRect(fdBoardWindow, aRect);
+		if DebugWindowSize then
+			begin
+				writeln('TGODocument.DoMakeWindows: CalcWindowRect(fdBoardWindow yields');
+				writeln ('   aRect.left, aRect.top = ',
+					aRect.left:1, ', ', aRect.top:1);
+			end;
+		WITH aWindowLoc DO
+			BEGIN
+				h := aRect.left + gDefaultBoardX;
+				v := aRect.top;
+				IF h > screenBits.bounds.right THEN
+					h := h - 2*gDefaultBoardX;
+			END;
+		MoveWindow (fdGameWindow.fWmgrWindow, aWindowLoc.h, aWindowLoc.v, FALSE);
+
+		IF fdReopening THEN
+			BEGIN
+					{ xxx load the window state from rsrc fork }
+					(* *** *** *)
+					
+					{Set location of main board window}
+				WITH fdDisplayState.BoardLoc DO
+			{$H-}	MoveWindow (fdBoardWindow.fWmgrWindow, h, v, FALSE);  {$H+}
+		
+					{Set location of game window}
+				WITH fdDisplayState.GamePort DO
+					BEGIN
+			{$H-}	MoveWindow (fdGameWindow.fWmgrWindow, left, top, FALSE);  {$H+}
+			{$H-}	SetPt (newGameSize, right - left, bottom - top);	{$H+}
+					END;
+					{Set size of game window}
+				fdGameWindow.Resize (newGameSize, FALSE);
+		
+					{Set location of style window right}
+				WITH fdDisplayState.StyleLoc DO
+			{$H-}	MoveWindow (fdStyleWindow.fWmgrWindow, h, v, FALSE);	{$H+}
+		
+					{Set scroll position of the game window}
+				aFrame := fdGameView.fFrame;
+				aFrame.FocusOnContainer;
+				SetCtlValue (aFrame.fScrollBars[v], fdDisplayState.GameScrollPos);
+				
+					{Install the correct value in the scrollbar}
+				aFrame.ScrlToSBars (FALSE);
+				{Finally, tell the frame to scroll to the position currently indicated
+					by its scrollbars}
+					(* *** *** *)
+					
+				ForceWindowOnScreen (fdBoardWindow);
+				ForceWindowOnScreen	(fdGameWindow);
+				ForceWindowOnScreen	(fdStyleWindow);
+			END
+		ELSE
+			BEGIN
+				if DebugWindowSize then
+					writeln (' *** getting ready to call SimpleStagger(s) ');
+				if fdAbstHier <> NIL then
+					with fdAbstHier^.DocumentInfo do
+						ResizeBoardWindow (dBoardSize); 
+				SimpleStagger (fdBoardWindow, kStaggerAmount, 2,
+							gBoardStagger);
+				{$IFC DebugDraw}
+				SimpleStagger (fdStringsWindow, kStaggerAmount, 2,
+							gBoardStagger);
+				SimpleStagger (fdBlocksWindow, kStaggerAmount, 2,
+							gBoardStagger);
+				SimpleStagger (fdGroupsWindow, kStaggerAmount, 2,
+							gBoardStagger);
+				SimpleStagger (fdAreasWindow, kStaggerAmount, 2,
+							gBoardStagger);
+				{$ENDC}
+				SimpleStagger (fdGameWindow, kStaggerAmount, 2,
+							gGameStagger);
+				SimpleStagger (fdStyleWindow, kStaggerAmount, 2,
+							gStyleStagger);
+				if DebugWindowSize then
+					writeln (' *** Done with SimpleStagger(s) ');
+			END;
+
+		{ Set the status for showing windows }
+	{$IFC DebugDraw}
+	(* xxx could set to false, and open when first request occurs *)
+	(* xxx could also have closing of these windows NOT imply closing of doc. *)
+	fdStringsWindow.fOpenInitially := true;
+	fdBlocksWindow.fOpenInitially := true;
+	fdGroupsWindow.fOpenInitially := true;
+	fdAreasWindow.fOpenInitially := true;
+	{$ENDC}
+	fdGameWindow.fOpenInitially := fdDisplayState.GameShows;
+	fdStyleWindow.fOpenInitially := fdDisplayState.StyleShows;
+
+	END; {TGODocument.DoMakeWindows}
+
+
+{$S AReadFile}
+PROCEDURE TGODocument.ResetBoardParameters (nline, nhand: integer);
+	BEGIN
+		{Setup Default Board}
+
+		fdAbstHier := SetUpGOBoard (fdAbstHier, nline, nhand, false); 
+		with fdAbstHier^.DocumentInfo do
+			begin
+				dReadyForGraphics := true;
+				dWantGraphics := true;
+			end;
+		ResizeBoardWindow (nline);
+	END; {ResetBoardParameters}
+
+PROCEDURE TGODocument.DoRead
+		(aRefNum: INTEGER; rsrcExists, forPrinting: BOOLEAN);
+	VAR 
+		numChars: LONGINT; 
+		nextChar: Ptr; 
+		err: integer;
+	
+	function ReadBrdSize (pAbsH: p2GOAbstHier; nline, nhand: integer): p2GOAbstHier;
+		begin
+			fdAbstHier := pAbsH;
+			ResetBoardParameters (nline, nhand);
+			ReadBrdSize := fdAbstHier;
+		end;
+		
+	BEGIN {TGODocument.DoRead}
+		{$IFC TraceAbst}
+		gTraceUpdate := false;		
+		{$ENDC}
+
+		{Read the text}
+		FailOSErr (GetEOF (aRefNum, numChars));
+
+		if fdTextHandle = nil then
+			begin
+				fdTextHandle := NewHandle (0);
+				FailNIL (fdTextHandle);
+			end;
+
+		SetHandleSize (fdTextHandle, numChars);
+		FailMemError;
+
+		FailOSErr (FSRead (aRefNum, numChars, fdTextHandle^));
+
+		{ Interpret the text }
+		err :=  ReadGODoc (fdAbstHier, fdTextHandle, numChars, ReadBrdSize);
+		
+		with fdAbstHier^ do
+			if DocumentInfo.dType = DocJoseki then
+				gJosekiDocument := @DocumentInfo;
+	
+		if err <> 0 then
+			Failure (err, 9000); { xxx ?? need a handler }
+		
+		{ xxx Throw the text away? or save it for Game window? }
+		SetHandleSize (fdTextHandle, 0);
+		FailMemError;
+
+		DisposHandle (fdTextHandle);
+		FailMemError;
+		fdTextHandle := nil;
+		
+	END; {TGODocument.DoRead}
+
+
+{$S ARes}	
+PROCEDURE TGODocument.DoSetupMenus; OVERRIDE;
+	var GameHasNotStarted: Boolean; cmd: integer;
+	BEGIN
+		INHERITED DoSetupMenus;
+		
+		if fdAbstHier <> NIL then
+		with fdAbstHier^, DocumentInfo do
+			begin
+				GameHasNotStarted := dNextMove = dNumHandicap+1;
+				
+				for cmd := cb9x9Command to cpartialCommand do
+					EnableCheck (cmd, GameHasNotStarted, false);
+					
+				case dBoardSize of
+					 9: EnableCheck (  cb9x9Command, GameHasNotStarted, true);
+					11: EnableCheck (cb11x11Command, GameHasNotStarted, true);
+					13: EnableCheck (cb13x13Command, GameHasNotStarted, true);
+					19: EnableCheck (cb19x19Command, GameHasNotStarted, true);
+				end;
+			
+				for cmd := evenCommand to whitePlayCommand do
+					EnableCheck (cmd, GameHasNotStarted, false);
+					
+				case dGameTerms of 
+					EvenGame: 
+						EnableCheck (evenCommand, GameHasNotStarted, true);
+					KomiHandicap: 
+						if dNumHandicap=4 then
+							EnableCheck (Komi4Command, GameHasNotStarted, true)
+						else if dNumHandicap=5 then
+							EnableCheck (Komi5Command, GameHasNotStarted, true);
+					PassesHandicap, StonesHandicap: 
+						EnableCheck (handicapCommand, GameHasNotStarted, true);
+				end;
+				
+				if fdDisplayState.GameState.Playing then
+					begin
+						if dBlackToPlay then
+							begin
+								EnableCheck (blackPlayCommand, GameHasNotStarted, true);
+								EnableCheck (whitePlayCommand, GameHasNotStarted, false);
+							end
+						else 
+							begin
+								EnableCheck (blackPlayCommand, GameHasNotStarted, false);
+								EnableCheck (whitePlayCommand, GameHasNotStarted, true);
+							end;
+					end
+				else
+					begin
+						EnableCheck (blackPlayCommand, GameHasNotStarted, false);
+						EnableCheck (whitePlayCommand, GameHasNotStarted, false);
+					end;
+					
+				EnableCheck (cnumberCommand, true, dNumberStones);
+				EnableCheck (clabelCommand, true, dLabelBoard);
+				EnableCheck (cChangeNumbersCommand, not GameHasNotStarted, dFirstNumber = dNextStone);
+				
+				EnableCheck (cCountPrisnorsCommand, not GameHasNotStarted, false);
+				EnableCheck (cTakeBackMoveCommand, not GameHasNotStarted, false);
+
+				EnableCheck (cMachinePlayCommand, true, dMachinePlaying);
+				EnableCheck (cRePlayCommand, not GameHasNotStarted, 
+							not fdDisplayState.GameState.Playing);
+							
+				EnableCheck (cStopReplayCommand, (not GameHasNotStarted) and
+							not fdDisplayState.GameState.Playing,
+							false);
+
+				EnableCheck (cEditJosekiCommand, dType=DocJoseki, 
+					dDisplayJoseki=EditOneJoseki);
+				EnableCheck (cShowAllJosekiCommand, 
+					(dType<>DocJoseki) and (gJosekiDocument<>nil), 
+					dDisplayJoseki=ShowAllJoseki);
+
+				EnableCheck (cActivateBoard, true, false);
+			
+				EnableCheck (cShowStringsCommand, true, fdShowStrings);
+				EnableCheck (cShowBlocksCommand, dUpdateLevel>=StringsGraphLevel, fdShowBlocks);
+				EnableCheck (cShowGroupsCommand, dUpdateLevel>=BlocksGraphLevel, fdShowGroups);
+				EnableCheck (cShowAreasCommand, dUpdateLevel>=GroupsGraphLevel, fdShowAreas);
+				
+				EnableCheck (cTraceUpdateCommand, true, false);
+				{$IFC TraceRequest} 
+				EnableCheck (cTraceRequestsCommand, true, gTraceRequest);
+				{$ELSEC}
+				EnableCheck (cTraceRequestsCommand, false, false);
+				{$ENDC}
+
+			end;
+	
+		(* Still left to do:
+		ShowCommentaryCommand 	= 8001;			{menu items, Windows menu}
+		ShowDebugCommand  			= 8002;		
+		*)
+	END; {TGODocument.DoSetupMenus}
+	
+{$S ASelCommand}
+FUNCTION TGODocument.DoMenuCommand (aCmdNumber: CmdNumber): TCommand; 
+		OVERRIDE;
+	CONST
+		DiscardingDLOG = 121; 
+		okButton = 1;
+		cancelButton = 2;
+		clearButton = 3;
+		mod100Button = 4;
+		CountingDLOG = 122; 
+		ChangeNumbersDLOG = 123;
+	VAR succeeded: BOOLEAN; 
+		nSize, nHand: integer; 
+		nShowJos: TShowJoseki;
+		goCmd: TMoveCommand;
+		itemHit : integer;
+		pDialog : DialogPtr;
+		WhiteCapByBlack, BlackCapByWhite: integer;
+		count1, count2: Str255;
+		moveN: integer;				{ index, "for" loop, pushing moves on replay stack }
+		tempList: p2ListItem; { temp. (non-sliding) list of replay points }
+		legal: integer;
+		aPt: Point; 
+		move: p2GOPoint;
+	
+		PROCEDURE BuildCmd (whichType:TGOMoveType);
+			BEGIN
+				NEW (goCmd);
+				goCmd.IMoveCommand;
+				goCmd.fCommandType := whichType;
+			END; {BuildCmd}
+	
+		procedure InvalTheRect (t: p2TreeNode);
+			var
+				goPt: p2GOPoint;
+			begin
+				with fdAbstHier^.DocumentInfo, t^ do
+					if TreeMoveX <> 0 then { ignore pass }
+						begin
+							goPt := @dBoard [TreeMoveX, TreeMoveY];
+							if goPt^.OccStatus = UnOcc then
+								InvalGOPoint (fdAbstHier, TreeMoveX, TreeMoveY);
+						end;
+			end; {InvalTheRect}
+			
+		procedure CheckInvalJoseki (var JTree: TJosekiControl; 
+						corn: integer; isReflect: Boolean);
+			begin
+				JTree.JosekiTree := gJosekiTree;
+				with fdAbstHier^, DocumentInfo do
+					begin
+						
+					end;
+			end; {CheckInvalJoseki}
+			
+		var
+			m: integer; { move index }
+			t: p2TreeNode; { really a p2JosekiTreeNode }
+			corn: integer; { index into normal and reflected Joseki arrays }
+			tempRect, R: Rect;
+			
+	BEGIN {TGODocument.DoMenuCommand}
+	
+		DoMenuCommand := gNoChanges;
+		goCmd := nil;
+		
+		if fdAbstHier <> nil then {??? xxx needed?}
+			begin
+			
+				with fdAbstHier^, DocumentInfo do
+					if dGameTerms = StonesHandicap then
+						nHand := dNumHandicap
+					else
+						nHand := 0;
+				
+				CASE aCmdNumber OF
+						{Edit menu:}
+					cActivateBoard:	
+						if gFrontWindow <> fdBoardWindow then
+							begin
+								gFrontWindow.Activate(false);
+								SelectWindow (fdBoardWindow.fWmgrWindow);
+								fdBoardWindow.Activate(true);
+								(* 	deactivated current window, but did not bring fdBoardWindow
+									to the front *)
+								fdBoardWindow.UpdateEvent;
+								(*  caused the current game (front) window to be redrawn, left the
+									the cursor setting appropriate for the board window. *) 
+							end;
+					
+						{Board menu:}
+					cb9x9Command:  	ResetBoardParameters ( 9, nHand); 						
+					cb11x11Command:	ResetBoardParameters (11, nHand); 						
+					cb13x13Command:	ResetBoardParameters (13, nHand); 
+					cb19x19Command:	ResetBoardParameters (19, nHand); 
+					 
+					cnumberCommand:
+						with fdAbstHier^, DocumentInfo do
+						begin
+							dNumberStones := not dNumberStones;
+							ResizeBoardWindow (dBoardSize);
+						end;
+						
+					cChangeNumbersCommand:
+						with fdAbstHier^, DocumentInfo do
+						begin
+							{$IFC qDebug}
+							if DebugChangeNumbers then
+								begin
+									write   ('Begin Change Numbers: dFirstNumber, dNextMove, dNextStone = ');
+									writeln (dFirstNumber:1, ' ', dNextMove:1, ' ', dNextStone:1);
+								end;
+							{$ENDC}
+							NumToString(dNextStone, count1);
+							NumToString(dNextStone mod 100, count2);
+							ParamText ('1', count1, count1, count2);
+							pDialog := GetNewDialog (ChangeNumbersDLOG, nil, WindowPtr(-1));
+							SetCursor(arrow);
+							repeat 
+								ModalDialog(nil, itemHit)
+							until (itemHit = okButton) or (itemHit = cancelButton) or 
+								(itemHit = clearButton) or (itemHit = mod100Button);
+							CloseDialog(pDialog);
+							if itemHit = okButton then
+								begin
+									dFirstNumber := dNextMove;
+									dNextStone := 1;
+									ResizeBoardWindow (dBoardSize);
+								end
+							else if itemHit = clearButton then
+								begin
+									dFirstNumber := dNextMove;
+									ResizeBoardWindow (dBoardSize);
+								end
+							else if itemHit = mod100Button then
+								begin
+									dFirstNumber := dNextMove;
+									dNextStone := dNextStone mod 100;
+									ResizeBoardWindow (dBoardSize);
+								end;
+							{$IFC qDebug}
+							if DebugChangeNumbers then
+								begin
+									write   ('End Change Numbers: dFirstNumber, dNextMove, dNextStone = ');
+									writeln (dFirstNumber:1, ' ', dNextMove:1, ' ', dNextStone:1);
+								end;
+							{$ENDC}
+						end;
+						
+					cMachinePlayCommand:
+						with fdAbstHier^, DocumentInfo do
+						begin
+							if dMachinePlaying then
+								begin
+									dMachinePlaying := false;
+									fdDisplayState.GameState.GameType := HumanHuman;
+								end
+							else
+								begin
+									dMachinePlaying := true;
+									fdDisplayState.GameState.GameType := HumanComputer;
+								end;
+							if dMachinePlaying then
+								if (gFrontWindow = fdBoardWindow) then								
+									begin
+										
+										fdWaitingForUser := false; { now waiting for ourselves! }
+										
+										fdBoardView.fFrame.Focus; { Get ready to draw }
+
+										BusyDelay (3600 {1 min.}, false);
+										RotateCursor (32); { should get it started }
+
+										{ xxx might be a compiler bug?? does not work without I }
+										repeat
+											InvalidateAll (fdAbstHier, true);
+
+											move := ComputeMove (fdAbstHier, true);
+			
+											dWantGraphics := true; {xxx bug in ComputeMove sets it false??}
+											legal := TryMakeMove (fdAbstHier, aPt, 
+													true {later: don't Tell User},
+													move, true {placePoint is known}, true {permanent});
+											dWantGraphics := true; {xxx maybe bug in TryMakeMove??}
+											if legal = 0 then
+												begin
+												
+													fdWaitingForUser := true; { now waiting for user again. }
+													
+													{ move this code into the Idle procedure! }
+													fdBoardView.DoJosekiMove (move);
+													{$IFC TraceAnalysisResults}
+														write('Calling DoInvalid for move at ');
+														with move^ do
+															WritePoint(XCoord, YCoord);
+														writeln;
+													{$ENDC}
+														
+													BeginInvalidate (fdAbstHier, move);
+													{$IFC DoTimers}
+													EndOfPhase (InvalPhase);
+													{$ENDC}
+												end
+											else
+												begin
+													{$IFC qDebug}
+													GOEngineError ('Illegal move', legal, 1);
+													{$ENDC}
+												end;
+												
+										until legal = 0;
+										
+										{$IFC DoTimers}
+										ReportPhaseTimers (output, false);
+										{$ENDC}
+										
+									end; {if dMachinePlaying ... }
+						end;
+						
+					cStopReplayCommand:
+						begin
+							if fdStopReplay <> fdAbstHier^.DocumentInfo.dNextMove then
+								begin
+									pDialog := GetNewDialog (DiscardingDLOG, 
+										nil, WindowPtr(-1));
+									SetCursor(arrow);
+									repeat 
+										ModalDialog(nil, itemHit)
+									until (itemHit = okButton) or (itemHit = cancelButton);
+									CloseDialog(pDialog);
+								end
+							else
+								itemHit := okButton; {no Dialog needed}
+							if itemHit = okButton then
+								begin
+									fdDisplayState.GameState.Playing := true;
+									if fdReplayList <> nil then 
+										with fdAbstHier^ do
+											begin
+												tempList := fdReplayList;
+												ReturnToAvailList (@PointGraph, tempList);
+												fdReplayList := nil;
+											end;
+								end;
+						end;
+						
+					cEditJosekiCommand:
+						with fdAbstHier^.DocumentInfo do
+							begin
+								if dDisplayJoseki = EditOneJoseki then
+									dDisplayJoseki := HideJoseki
+								else
+									dDisplayJoseki := EditOneJoseki;
+								R := fdBoardInterior;
+								fdBoardView.fFrame.InvalidRect (R);
+							end;
+						
+					cShowAllJosekiCommand:
+						with fdAbstHier^, DocumentInfo do
+							begin
+								if dDisplayJoseki = ShowAllJoseki then
+									dDisplayJoseki := HideJoseki
+								else
+									with fdAbstHier^.DocumentInfo do
+										if (dNextMove = dNumHandicap+1{GameHasNotStarted}) then
+											begin
+												dDisplayJoseki := ShowAllJoseki;
+												StartJosekiManagers (@DocumentInfo, gJosekiTree);
+											end;
+								R := fdBoardInterior;
+								fdBoardView.fFrame.InvalidRect (R);
+							end;
+
+					cRePlayCommand:
+						begin
+							if fdDisplayState.GameState.Playing then
+								begin
+									with fdAbstHier^.DocumentInfo do
+										begin
+											nSize := dBoardSize;
+											nHand := dNumHandicap;
+											nShowJos := dDisplayJoseki;
+											fdStopReplay := dNextMove;
+											tempList := nil;
+										end;
+									fdAbstHier := SetUpGOBoard (fdAbstHier, nSize, nHand, 
+											true);
+									fdDisplayState.GameState.Playing := false;
+									with fdAbstHier^, DocumentInfo do
+										begin
+											dReadyForGraphics := true;
+											dWantGraphics := true;
+											dDisplayJoseki := nShowJos;
+											if nShowJos = ShowAllJoseki then
+												StartJosekiManagers (@DocumentInfo, gJosekiTree);
+											for moveN := fdStopReplay-1 downto dNextMove do
+												Push (@PointGraph, tempList, 
+													p2Node (dGameRecord[moveN].MovePoint));
+											fdReplayList := tempList;
+										end;
+									R := fdBoardInterior;
+									fdBoardView.fFrame.InvalidRect (R);
+								end
+							else;
+						end;
+						
+					clabelCommand:
+						with fdAbstHier^, DocumentInfo do
+						begin
+							dLabelBoard := not dLabelBoard;
+							if dLabelBoard then
+								begin
+									dHorOffset := dBoxH + 4;
+									dVerOffset := dBoxV + 4;
+								end
+							else
+								begin
+									dHorOffset := 4;
+									dVerOffset := 4;
+								end;
+							ResizeBoardWindow (dBoardSize);
+						end;
+						
+					cpartialCommand:
+						begin
+							{Bring up partial dBoard dialog.}
+						end;
+						
+					cCountPrisnorsCommand:
+						begin
+							with fdAbstHier^ do
+								CountPrisoners (@DocumentInfo, WhiteCapByBlack, BlackCapByWhite);
+							{$IFC qDebug}
+							if DebugCountPrisoners then
+								begin
+									writeln ('Prisoners -- ');
+									writeln ('   Black stones captured by White: ', BlackCapByWhite:1);
+									writeln ('   White stones captured by Black: ', WhiteCapByBlack:1); 
+								end;
+							{$ENDC}
+							NumToString(BlackCapByWhite, count1);
+							NumToString(WhiteCapByBlack, count2);
+							ParamText (count1, count2, '', '');
+							pDialog := GetNewDialog (CountingDLOG, nil, WindowPtr(-1));
+							SetCursor(arrow);
+							repeat 
+								ModalDialog(nil, itemHit)
+							until (itemHit = okButton);
+							CloseDialog(pDialog);
+						end;
+				
+					cTakeBackMoveCommand:
+						with fdAbstHier^, DocumentInfo do
+							begin
+								{ Get Ready for UnmakeMove to call inval}
+								fdBoardView.fFrame.Focus;
+								
+								case dDisplayJoseki of
+									EditOneJoseki:
+										ForEachChild (@dCurJoseki^.tree, InvalTheRect);
+									ShowAllJoseki:
+										EachJosekiMgr (@DocumentInfo, CheckInvalJoseki);
+								end; {case dDisplayJoseki}
+								
+								UnMakeMove (fdAbstHier);
+								
+								case dDisplayJoseki of
+									EditOneJoseki:
+										begin
+											{ set JosekiTree back to root }
+											dCurJoseki := gJosekiTree; 
+											{ for each move, find child }
+											for m := 1 to dNextMove-1 do
+												begin
+													with dGameRecord [m] do
+														if MovePoint = nil then
+															begin
+																t := FindChild (@dCurJoseki^.tree, 0, 0);
+																if t <> nil then
+																	dCurJoseki := p2JosekiTreeNode (t)
+																else
+																	GOEngineError ('Can''t find next Joseki point: pass.',
+																		0, 1);
+															end
+														else with MovePoint^ do
+															begin
+																t := FindChild (@dCurJoseki^.tree, XCoord, YCoord);
+																if t <> nil then
+																	dCurJoseki := p2JosekiTreeNode (t)
+																else
+																	GOEngineError ('Can''t find next Joseki point: ', 
+																		1000*XCoord+YCoord, 2);
+															end;
+												end;
+											{ redraw the Joseki points }
+											ForEachChild (@dCurJoseki^.tree, InvalTheRect);
+										end;
+									ShowAllJoseki:
+										begin
+											{??TheJosekiTree := gJosekiTree;}
+											EachJosekiMgr (@DocumentInfo, CheckInvalJoseki);
+										end;
+								end; {case dDisplayJoseki}
+
+								if dMachinePlaying then
+									{ turn off machine playing, 
+											so starting again will call InvalidateAll (once) }
+									begin
+										dMachinePlaying := false;
+										fdDisplayState.GameState.GameType := HumanHuman;
+									end;
+								
+								if not fdDisplayState.GameState.Playing then
+									begin { Replaying }
+										tempList := fdReplayList;
+										Push (@PointGraph, tempList, 
+											p2Node (dGameRecord[dNextMove].MovePoint));
+										fdReplayList := tempList;
+									end;
+							end; 
+						
+					evenCommand:
+						begin
+						(* ***
+							dGameTerms := EvenGame;
+							dNumHandicap := 0;
+							BuildCmd (HandicapType);
+							*** *)
+						end;
+						
+					Komi4Command:
+						begin
+						(* ***
+							dGameTerms := KomiHandicap;
+							dNumHandicap := 4;
+							BuildCmd (HandicapType);
+							*** *)
+						end;
+						
+					Komi5Command:
+						begin
+						(* ***
+							dGameTerms := KomiHandicap;
+							dNumHandicap := 5;
+							BuildCmd (HandicapType);
+							*** *)
+						end;
+						
+					handicapCommand:
+						begin
+				
+				(* ***
+				dGameTerms := EvenGame;
+				dNumHandicap := 0;
+				dGameRules := JapaneseRules;
+		
+							{ xxx later: support PassesHandicap (Chinese rules) }
+							dGameTerms := StonesHandicap;
+							{ xxx later: bring up dialog box to set number. }
+							case dBoardSize of
+								 9: dNumHandicap := 4;
+								11: dNumHandicap := 4;
+								13: dNumHandicap := 5;
+								19: dNumHandicap := 9;
+							end;
+							
+							BuildCmd (HandicapType);
+						*** *)
+						end;
+		
+					blackPlayCommand:
+						begin
+						end;
+						
+					whitePlayCommand:
+						begin
+						end;
+						
+							{Windows menu:}
+					ShowCommentaryCommand:
+						begin
+							(* 
+							ShowWindow (CommentaryWindow);
+							SelectWindow (CommentaryWindow);
+							*)
+						end;
+						
+					ShowDebugCommand:
+						begin
+							(*
+							ShowWindow (DebugWindow);
+							SelectWindow (DebugWindow);
+							*)
+						end;
+						
+							{Debug menu:}
+					cShowStringsCommand:
+						begin
+							fdShowStrings := not fdShowStrings;
+							if fdShowStrings then
+								DoShowStrings;
+						end;
+					
+					cShowBlocksCommand:
+						begin
+							fdShowBlocks := not fdShowBlocks;
+							if fdShowBlocks then
+								DoShowBlocks;
+						end;
+
+					cShowGroupsCommand:
+						begin
+							fdShowGroups := not fdShowGroups;
+							if fdShowGroups then
+								DoShowGroups;
+						end;
+
+					cShowAreasCommand:
+						begin
+							fdShowAreas := not fdShowAreas;
+							if fdShowAreas then
+								DoShowAreas;
+						end;
+
+					cTraceUpdateCommand:
+						begin
+							{$IFC TraceAbst}
+							gTraceUpdate := not gTraceUpdate;
+							{$ENDC}
+						end;
+								
+					cTraceRequestsCommand:
+						begin
+							{$IFC TraceRequest} 
+							gTraceRequest := not gTraceRequest;
+							{$ENDC}
+						end;
+												
+					OTHERWISE
+						DoMenuCommand := INHERITED DoMenuCommand (aCmdNumber);
+		
+				END; {case}
+				
+			end;
+
+		if goCmd <> nil then
+			DoMenuCommand := goCmd;
+		
+	END; {TGODocument.DoMenuCommand}
+	
+{$S ARes}
+PROCEDURE TGODocument.DoIdle(phase: IdlePhase); OVERRIDE;
+	BEGIN
+		if fdWaitingForUser then
+			begin
+				{ if needed, Invalidate and recompute one Analysis }
+				if phase = idleContinue then
+					if not ContinueInvalidate (fdAbstHier) then
+						begin
+							SetGOAbstHierLevel (fdAbstHier, GroupsGraphLevel); { for debugging }
+							(* writeln ('I can think faster than you can!'); *)
+						end;
+			end
+		else
+			begin 
+				{ currently Compute Move does not yield until done, but when it does: }
+				(* writeln ('Idle hands are the devil''s workshop.'); *)
+			end;
+	END; {TGODocument.DoIdle}
+	
+{$S ANonRes}
+PROCEDURE TGODocument.DoShowStrings; 
+	{redraw the Strings Graph}
+	BEGIN
+	{$IFC DebugDraw}
+		if gFrontWindow <> fdStringsWindow then
+			begin
+				gFrontWindow.Activate(false);
+				SelectWindow (fdStringsWindow.fWmgrWindow);
+				fdStringsWindow.Activate(true);
+			end;
+		fReadyForDebugDrawing := TRUE;
+		fdStringsView.fFrame.ForceRedraw;
+	{$ENDC}
+	END; {TGODocument.DoShowStrings}
+
+{$S ANonRes}
+PROCEDURE TGODocument.DoShowBlocks; 
+	{redraw the Blocks Graph}
+	BEGIN
+	{$IFC DebugDraw}
+		if gFrontWindow <> fdBlocksWindow then
+			begin
+				gFrontWindow.Activate(false);
+				SelectWindow (fdBlocksWindow.fWmgrWindow);
+				fdBlocksWindow.Activate(true);
+			end;
+		fReadyForDebugDrawing := TRUE;
+		fdBlocksView.fFrame.ForceRedraw;
+	{$ENDC}
+	END; {TGODocument.DoShowBlocks}
+
+{$S ANonRes}
+PROCEDURE TGODocument.DoShowGroups; 
+	{redraw the Groups Graph}
+	BEGIN
+	{$IFC DebugDraw}
+		if gFrontWindow <> fdGroupsWindow then
+			begin
+				gFrontWindow.Activate(false);
+				SelectWindow (fdGroupsWindow.fWmgrWindow);
+				fdGroupsWindow.Activate(true);
+			end;
+		fReadyForDebugDrawing := TRUE;
+		fdGroupsView.fFrame.ForceRedraw;
+	{$ENDC}
+	END; {TGODocument.DoShowGroups}
+
+{$S ANonRes}
+PROCEDURE TGODocument.DoShowAreas; 
+	{redraw the Areas Graph}
+	BEGIN
+	{$IFC DebugDraw}
+		if gFrontWindow <> fdAreasWindow then
+			begin
+				gFrontWindow.Activate(false);
+				SelectWindow (fdAreasWindow.fWmgrWindow);
+				fdAreasWindow.Activate(true);
+			end;
+		fReadyForDebugDrawing := TRUE;
+		fdAreasView.fFrame.ForceRedraw;
+	{$ENDC}
+	END; {TGODocument.DoShowAreas}
+
+FUNCTION TGODocument.SetUpForClipBoard : TBoardView; 
+	{Using one document, up for clipboard drawing.}
+	VAR
+		clipDoc: 	TGODocument;
+		copyView: 	TBoardView;
+		fi:			FailInfo;
+		
+		i, err,
+		x, y:			integer;
+		mvPt, 
+		newPt:		p2GOPoint;
+		p:				Point;
+		r:				Rect;
+		abPtr:		p2GOAbstHier;
+		
+		
+		tempDate: str255;
+		tempPlace: str255;
+		tempType: TDocType;
+		tempTitle: str255;
+		tempWhitePlayer: TDocStr;
+		tempBlackPlayer: TDocStr;
+		tempGameRules: TGameRules;
+		tempGameTerms: TGameTerms;
+
+		tempNumHandicap: integer;
+		tempBoardSize: integer;
+
+		tempNextMove: integer;
+		tempNextStone: integer;
+		tempFirstNumber: integer;
+		
+		tempLabelBoard: Boolean;
+		tempNumberStones: Boolean;
+
+		PROCEDURE HdlFailure(error: OSErr; message: LONGINT);
+		BEGIN
+			clipDoc.Free;
+		END;
+
+	BEGIN
+		{ might save selection here. }
+		new(clipDoc);
+		FailNIL(clipDoc);
+		clipDoc.IGODocument;
+		
+		CatchFailures(fi, HdlFailure);
+
+		new(copyView);
+		FailNil (copyView);
+		copyView.IBoardView (TRUE, clipDoc);
+		
+		{Set fBoardView since the doc is NOT told to DoMakeViews}
+		clipDoc.fdBoardView := copyView;
+
+		with fdAbstHier^.DocumentInfo do
+			begin
+				tempDate := dDate;
+				tempPlace := dPlace;
+				tempType := dType;
+				tempTitle := dTitle;
+				tempWhitePlayer := dWhitePlayer;
+				tempBlackPlayer := dBlackPlayer;
+				tempGameRules := dGameRules;
+				tempGameTerms := dGameTerms;
+
+				tempNumHandicap := dNumHandicap;
+				tempBoardSize := dBoardSize;
+				
+				tempNextMove := dNextMove;
+				tempNextStone := dNextStone;
+				tempFirstNumber := dFirstNumber;
+				
+				tempLabelBoard := dLabelBoard;
+				tempNumberStones := dNumberStones;
+
+			end;
+
+		clipDoc.fdAbstHier := SetUpGOBoard (NIL, tempBoardSize, tempNumHandicap, 
+						false);
+		
+		with clipDoc.fdAbstHier^.DocumentInfo do
+			begin
+				dDate := tempDate;
+				dPlace := tempPlace;
+				dTitle := tempTitle;
+				dWhitePlayer := tempWhitePlayer;
+				dBlackPlayer := tempBlackPlayer;
+				dGameRules := tempGameRules;
+				dGameTerms := tempGameTerms;
+
+				dLabelBoard := tempLabelBoard;
+				if tempLabelBoard then
+					begin
+						dHorOffset := dBoxH + 4;
+						dVerOffset := dBoxV + 4;
+					end;
+				dNumberStones := tempNumberStones;
+			end;
+			
+		abPtr := clipDoc.fdAbstHier;
+		for i := tempNumHandicap+1 to tempNextMove-1 do
+			begin
+				mvPt := fdAbstHier^.DocumentInfo.dGameRecord[i].MovePoint;
+				if mvPt = nil then
+					newPt := nil
+				else with mvPt^ do
+					begin
+						x := XCoord;
+						y := YCoord;
+						with abPtr^.DocumentInfo do
+							newPt := @dBoard [X,Y];
+					end;
+				with clipDoc.fdAbstHier^.DocumentInfo do
+					if dNextMove = tempFirstNumber then
+						begin
+							dFirstNumber := tempFirstNumber;
+							dNextStone := tempNextStone -(tempNextMove-dNextMove);
+						end;
+				err := TryMakeMove (abPtr, p, false, newPt, TRUE, TRUE);
+				if err <> 0 then
+					GOEngineError ('Illegal move while copying to Clipboard.', err, 2);
+			end;
+			
+		with clipDoc.fdAbstHier^.DocumentInfo do
+			begin
+				dReadyForGraphics := true;
+				dWantGraphics := true;
+			end;
+			
+		clipDoc.ResizeBoardWindow (tempBoardSize);
+		
+		FailSpaceIsLow;
+		Success(fi);
+		
+		SetUpForClipBoard := copyView;
+		
+	END; {TGODocument.SetUpForClipBoard}
+			
+
+{$S ARes}
+PROCEDURE TBoardView.Draw (area: Rect); OVERRIDE;
+	var
+		tempRect: Rect;
+	BEGIN
+		if fGODocument <> NIL then
+			if fGODocument.fdAbstHier <> NIL then
+				with fGODocument.fdAbstHier^, DocumentInfo do
+					begin
+						tempRect := gZeroRect;
+						if (dDisplayJoseki=EditOneJoseki) and (gJosekiDocument <> nil) then
+							DrawBoard (@DocumentInfo, area, fClipPICT, 
+								EditOneJoseki, gJosekiDocument^.dCurJoseki, tempRect)
+						else
+							DrawBoard (@DocumentInfo, area, fClipPICT, 
+								dDisplayJoseki, nil, tempRect);
+						fBlinkIsInverted := false; { just redrawn, non-inverted }
+						fWhereToBlink := tempRect;
+					end;
+	END; {TBoardView.Draw}
+
+{$S ARes}
+FUNCTION TBoardView.DoSetCursor (localPoint: Point): BOOLEAN; OVERRIDE;
+	BEGIN
+		DoSetCursor := false;
+		if fGODocument <> NIL then
+			if fGODocument.fdAbstHier <> NIL then
+				with fGODocument, fdAbstHier^.DocumentInfo do
+					if fdDisplayState.GameState.Playing then
+						begin
+							if fdWaitingForUser then
+								begin
+									if dBlackToPlay then SetCursor (gBlackCursHdl^^)
+									else SetCursor (gWhiteCursHdl^^);
+								end
+							else
+								RotateCursor (32); { should get it started }
+							DoSetCursor := true;
+						end;
+	END; {TBoardView.DoSetCursor}
+	
+{$S AOpen}
+PROCEDURE TBoardView.IBoardView (forClipBoard: Boolean; 
+						itsGODocument: TGODocument);
+	VAR
+		viewRect: Rect;
+		aStdPrintHandler: TStdPrintHandler;
+		sd: SizeDeterminer;
+	BEGIN
+		fGODocument := itsGODocument;
+		if fGODocument.fdAbstHier <> NIL then
+			with fGODocument.fdAbstHier^.DocumentInfo do
+				begin
+					SetRect (viewRect, 0{left},0{top},
+							dBoardSize*dBoxH + 2*dHorOffset{right},
+							dBoardSize*dBoxV + 2*dVerOffset{bottom});
+					if DebugWindowSize then
+						begin
+							writeln('TBoardView.IBoardView: call SetRect (viewRect');
+							writeln ('   dBoardSize*dBoxH+2*dHorOffset, ...dBoxV... = ',
+								dBoardSize*dBoxH + 2*dHorOffset:1, ', ', dBoardSize*dBoxV + 2*dVerOffset:1);
+						end;
+				end
+		else
+			begin
+				SetRect (viewRect, 0{left}, 0{top},
+						gDefaultBoardX{right},
+						gDefaultBoardY{bottom});
+					if DebugWindowSize then
+						begin
+							writeln('TBoardView.IBoardView: call SetRect (viewRect');
+							writeln ('   gDefaultBoardX, gDefaultBoardY = ',
+								gDefaultBoardX:1, ', ', gDefaultBoardY:1);
+						end;
+				end;
+				
+		IF forClipboard THEN
+			sd := sizeVariable
+		ELSE
+			sd := sizeFixed;
+			
+		fClipPICT := forClipboard;	
+		
+		IView (NIL, itsGODocument, viewRect, sd, sd, 
+			True {can contain selection}, 
+			hlOff {highlighting off when inactive});
+
+		IF forClipboard THEN { see Draw Shapes Sample }
+			fWouldMakePICTScrap := TRUE
+		ELSE
+			BEGIN
+		{ see CookBook, p. 152 }
+				New(aStdPrintHandler);
+				FailNIL(aStdPrintHandler);
+				aStdPrintHandler.IStdPrintHandler(SELF, FALSE);
+			END;
+
+		fIdlePriority := 10; { some room to barter? }
+
+	END; {TBoardView.IBoardView}
+
+{$S ASelCommand}
+PROCEDURE TBoardView.DoJosekiMove (placePoint: p2GOPoint);
+
+	procedure InvalTheRect (t: p2TreeNode);
+		var
+			goPt: p2GOPoint;
+		begin
+			with fGODocument, fdAbstHier^.DocumentInfo, t^ do
+				if TreeMoveX <> 0 then { ignore pass }
+					begin
+						goPt := @dBoard [TreeMoveX, TreeMoveY];
+						if goPt^.OccStatus = UnOcc then
+							InvalGOPoint (fdAbstHier, TreeMoveX, TreeMoveY);
+					end;
+		end; {InvalTheRect}
+
+	procedure CondInvalRects (var JTree: TJosekiControl; 
+					corn: integer; isReflect: Boolean);
+
+		procedure InvalTransRect (t: p2TreeNode);
+			var
+				NewX, NewY: integer;
+			begin
+				with fGODocument, fdAbstHier^,DocumentInfo, t^ do
+					begin
+						if InverseJosekiTransform (@DocumentInfo, isReflect, corn,
+								TreeMoveX, TreeMoveY, NewX, NewY) then
+							InvalGOPoint (fdAbstHier, NewX, NewY);
+					end;
+			end; {InvalTransRect}
+
+		begin
+			with JTree do
+				case JosekiState of
+					AtBegin, OnCurr, BelowCurr:
+						ForEachChild (@JosekiTree^.tree, InvalTransRect);
+				end; {case JosekiState}
+		end; {CondInvalRects}
+		
+	procedure CallMakeJosekiMove (var JTree: TJosekiControl; 
+				corn: integer; isReflect: Boolean);
+		begin
+			with fGODocument.fdAbstHier^, JTree do
+				begin
+					{$IFC TraceJoseki}
+					write ('In CallMakeJosekiMove, corn: ', corn:1, ' ',
+							isReflect, ' ');
+					if placePoint = nil then
+						write (' pass ')
+					else with placePoint^ do
+						write (XCoord:1, ' ', YCoord:1, ' ');
+					if JosekiTree= nil then
+						writeln (' nil JosekiTree.')
+					else with JosekiTree^.tree do
+						writeln (TreeMoveX:1, ' ', TreeMoveY:1);
+					{$ENDC}
+					with fGODocument.fdAbstHier^ do
+						MakeJosekiMove (@DocumentInfo, placePoint, JTree, corn, isReflect);
+				end;
+		end; {CallMakeJosekiMove}
+
+					
+	VAR
+		t2: p2TreeNode;
+
+	BEGIN {TBoardView.DoJosekiMove}
+		with fGODocument.fdAbstHier^, DocumentInfo do
+			case dDisplayJoseki of
+				EditOneJoseki:
+					begin
+						ForEachChild (@dCurJoseki^.tree, InvalTheRect);
+						if placePoint = nil then
+							t2 := FindChild (@dCurJoseki^.tree, 0, 0)
+						else
+							with placePoint^ do
+								t2 := FindChild (@dCurJoseki^.tree, XCoord, YCoord);
+						if t2 = nil then
+							begin
+								NewMoveTreeNode (@StringGraph, t2, placePoint);
+								with p2JosekiTreeNode(t2)^ do
+									begin
+										value := GoodJosekiMove;
+										conditions := nil;
+									end;
+								{ add new child }
+								AddChild (@dCurJoseki^.tree, t2);
+							end;
+						dCurJoseki := p2JosekiTreeNode (t2);
+						ForEachChild (@dCurJoseki^.tree, InvalTheRect);
+					end;
+				ShowAllJoseki:
+					with fGODocument.fdAbstHier^ do
+						begin
+							EachJosekiMgr (@DocumentInfo, CondInvalRects);
+							
+							EachJosekiMgr (@DocumentInfo, CallMakeJosekiMove);
+							
+							EachJosekiMgr (@DocumentInfo, CondInvalRects);
+						end;
+				otherwise
+					if gJosekiTree <> nil then
+						EachJosekiMgr (@DocumentInfo, CallMakeJosekiMove);
+			end; {case dDisplayJoseki}
+	END; {TBoardView.DoJosekiMove}
+
+{$S ASelCommand}
+PROCEDURE TBoardView.DoMakeMove (downLocalPoint: Point; doPass: Boolean);
+
+	VAR
+		placePoint: p2GOPoint; aPt: Point;
+		placeMark: integer;
+		legal : integer; {xxx Debug -- remove.}
+		tempList: p2ListItem; { temp. (non-sliding) list of replay points }
+		tempRect, R: rect;
+		
+	BEGIN {TBoardView.DoMakeMove}
+	
+		(* should not do analysis JUST before invalidating, i.e. placing a new stone. *)
+			
+		if fGODocument.fdDisplayState.GameState.Playing then
+			begin
+				placePoint := nil;
+				if TryMakeMove (fGODocument.fdAbstHier, downLocalPoint, true{Tell User},
+								placePoint, doPass {for pass: placePoint known (=nil)}, 
+								true {permanent}) <> 0 then 
+					{ user know's what to do with error }
+				else { move was o.k.}
+					begin
+						{$IFC TraceAbst}
+						if gTraceUpdate then
+							writeln (' Made Move(Index): ', fGODocument.fdAbstHier^.DocumentInfo.dNextMove-1);
+						{$ENDC}
+						
+						if placePoint <> nil then
+							begin
+								fHaveMoveToBlink := true;
+								fWhereToBlink := gZeroRect;
+								{ fWhereToBlink is set in calls to DrawBoard }
+							end;
+						
+							{ Move this code to Idle procedure }
+						DoJosekiMove (placePoint);
+						{$IFC TraceAnalysisResults}
+							write('Calling DoInvalid from DoMakeMove for move at ');
+							with placePoint^ do
+								WritePoint(XCoord, YCoord);
+							writeln;
+						{$ENDC}
+						{ move this code to Idle procedure? }
+						if fGODocument.fdAbstHier^.DocumentInfo.dMachinePlaying then
+							begin
+							
+								BeginInvalidate ( fGODocument.fdAbstHier, placePoint );
+						
+								BusyDelay (3600 {1 min.}, false);
+								RotateCursor (32); { should get it started }
+
+								if placePoint <> nil then
+									begin
+										tempRect := gZeroRect;
+										fFrame.Focus; { Get ready to draw }
+										with placePoint^, fGODocument, fdAbstHier^,
+												DocumentInfo do
+											begin
+												R := fdBoardInterior;
+												DrawPoint (@DocumentInfo, 
+														XCoord, YCoord, 
+														dDisplayJoseki, nil,
+														temprect, R);
+											end;
+										fHaveMoveToBlink := true;
+										fBlinkIsInverted := false; 
+											{ just redrawn, non-inverted }
+										fWhereToBlink := tempRect;
+									end;
+									
+								repeat
+									placePoint := ComputeMove (fGODocument.fdAbstHier, true);
+									legal := TryMakeMove (fGODocument.fdAbstHier, aPt, 
+											true {later: don't Tell User},
+											placePoint, true {placePoint is known}, true {permanent});
+									if legal = 0 then
+										begin
+										
+											fGODocument.fdWaitingForUser := true; 
+												{ now waiting for user again. }
+													
+											DoJosekiMove (placePoint);
+											{$IFC TraceAnalysisResults}
+												write('Calling DoInvalid from DoMakeMove move at ');
+												with placePoint^ do
+													WritePoint(XCoord, YCoord);
+												writeln;
+											{$ENDC}
+											BeginInvalidate (fGODocument.fdAbstHier, placePoint );
+											{$IFC DoTimers}
+											EndOfPhase (InvalPhase);
+											{$ENDC}
+										end
+									else
+										begin
+											{$IFC qDebug}
+											GOEngineError ('Illegal move', legal, 1);
+											{$ENDC}
+										end;
+										
+								until legal = 0;
+								
+								{$IFC DoTimers}
+								ReportPhaseTimers (output, false);
+								{$ENDC}
+										
+							end;
+					end;
+			end {if fGODocument.fdDisplayState.GameState.Playing }
+		else { "replaying" }
+			with fGODocument, fdAbstHier^, DocumentInfo do
+				begin
+					if (dNextMove < fdStopReplay) and (fdReplayList <>nil) then
+						begin
+							tempList := fdReplayList;
+							placePoint :=  p2GOPoint (Pop (@PointGraph, tempList));
+							fdReplayList := tempList;
+							if TryMakeMove (fGODocument.fdAbstHier, aPt, true{Tell User},
+										placePoint, true{placePoint known}, true{permanent}) <> 0 then 
+								{ xxx Tell user know's that Replay command is screwed up! }	
+							else
+								begin
+								
+									if placePoint <> nil then
+										begin
+											fHaveMoveToBlink := true;
+											fWhereToBlink := gZeroRect;
+											{ fWhereToBlink is set in calls to DrawBoard }
+										end;
+												
+									DoJosekiMove (placePoint);
+								end;
+							if fGODocument.fdShowStrings then
+								fGODocument.DoShowStrings;
+							if fGODocument.fdShowBlocks then
+								fGODocument.DoShowBlocks;
+							if fGODocument.fdShowGroups then
+								fGODocument.DoShowGroups;
+							if fGODocument.fdShowAreas then
+								fGODocument.DoShowAreas;
+						end
+					else
+						begin
+							{ xxx Tell user Replay is finished! }
+							fdDisplayState.GameState.Playing := True; { go back to playing }
+						end;
+				end; {with fGODocument, fdAbstHier^, DocumentInfo}
+
+	END; {TBoardView.DoMakeMove}
+
+{$S ASelCommand}
+FUNCTION  TBoardView.DoMouseCommand (VAR downLocalPoint: Point; 
+						VAR Info: EventInfo; VAR hysteresis: Point): TCommand; OVERRIDE;
+	VAR
+		R: Rect;
+	BEGIN {TBoardView.DoMouseCommand}
+		DoMouseCommand := gNoChanges;
+		
+		R := fGODocument.fdBoardInterior;
+		IF PtInRect (downLocalPoint, R) THEN
+			BEGIN
+				 DoMakeMove(downLocalPoint, false);
+			END;
+		
+	END; {TBoardView.DoMouseCommand}
+	
+{$S AClipboard}
+PROCEDURE TBoardView.WriteToDeskScrap;
+	BEGIN
+		INHERITED WriteToDeskScrap;
+	END; {TBoardView.WriteToDeskScrap}
+	
+{$S ARes}	
+PROCEDURE TBoardView.DoSetupMenus; OVERRIDE;
+	BEGIN
+		INHERITED DoSetupMenus;
+		with fGODocument.fdAbstHier^, DocumentInfo do
+			EnableCheck (cPassCommand, not (dNextMove = dNumHandicap+1) and
+				fGODocument.fdDisplayState.GameState.Playing, false);
+		Enable (cCopy, TRUE);
+	END; {TBoardView.DoSetupMenus}
+
+{$S ASelCommand}
+FUNCTION TBoardView.DoMenuCommand (aCmdNumber: CmdNumber): TCommand; OVERRIDE;
+	VAR
+		boardCopyCommand:	TBoardCopyCommand;
+		aPt: Point;
+	BEGIN
+		DoMenuCommand := gNoChanges;
+		CASE aCmdNumber OF
+					{Play menu:}
+			cPassCommand:
+				begin
+					DoMakeMove(aPt, true);				
+				end;
+			cCopy:
+				BEGIN
+					New(boardCopyCommand);
+					FailNil(boardCopyCommand);
+					boardCopyCommand.IBoardCopyCommand(aCmdNumber, SELF);
+					DoMenuCommand := boardCopyCommand;
+				END;
+				
+			otherwise
+				DoMenuCommand := INHERITED DoMenuCommand(aCmdNumber);
+		END; {cases}
+	END; {TBoardView.DoMenuCommand}
+		
+{$S ARes}
+PROCEDURE TBoardView.DoIdle (phase: IdlePhase); OVERRIDE;
+	const TicksBetweenBlinks = 32;
+	var NewTickCount: longint;
+	BEGIN
+		if fHaveMoveToBlink then
+			begin
+				fFrame.Focus;
+				case phase of
+					idleBegin:
+						begin
+							{$H-}
+							InvertRect (fWhereToBlink);
+							{$H+}
+							fBlinkedTicks := TickCount;
+							fBlinkIsInverted := true;
+						end;
+					idleContinue:
+						begin
+							NewTickCount := TickCount;
+							if abs (NewTickCount-fBlinkedTicks) > TicksBetweenBlinks then
+								begin
+									{$H-}
+									InvertRect (fWhereToBlink);
+									{$H+}
+									fBlinkedTicks := NewTickCount;
+									fBlinkIsInverted := not fBlinkIsInverted;
+								end;
+						end;
+					idleEnd: { leave it in right state }
+						if fBlinkIsInverted then
+							begin
+								{$H-}
+								InvertRect (fWhereToBlink);
+								{$H+}
+								fBlinkIsInverted := false;
+							end;
+				end; {case phase}
+			end;
+	END; {TBoardView.DoIdle}
+	
+(* ***
+{$S ASelCommand}
+FUNCTION  TBoardView.DoKeyCommand (ch: Char; aKeyCode: INTEGER; 
+						VAR info: EventInfo): TCommand; OVERRIDE;
+	BEGIN
+		DoMenuCommand := INHERITED DoKeyCommand(aCmdNumber);		
+	END; {TBoardView.DoKeyCommand}
+	*** *)
+	
+
+CONST 
+		{ constants for drawing the Game record }
+	kGameRowHeight 	=	12; 	{ height of a row in Game view}
+	kGameTitleHeight	=	14; { height of column headings in Game view}
+	kMoveStart		=	8;			{ hor. loc: move number}
+	kColumnStart		=	70; 	{ hor. loc: column letters}
+	kRowStart		=	120;			{ hor. loc: row number}
+
+{$S ARes}
+PROCEDURE TGameView.Draw (area: Rect); OVERRIDE;
+
+	VAR 
+		i:					integer;
+		aString:		String[19];
+		aRow:				integer;
+		aCol:				integer;
+		vertCoord:	INTEGER;
+		
+		mvPt:				p2GOPoint;
+		aChar:			char;
+		valString: 	Str255;
+	BEGIN
+		TextFont (ApplFont);
+		TextFace ([bold]);
+		MoveTo (kMoveStart, 12);
+		DrawString ('Move');
+		MoveTo (kColumnStart - 8, kGameRowHeight);
+		DrawString ('X Coord');
+		MoveTo (kRowStart - 8, kGameRowHeight);
+		DrawString ('Y Coord');
+		
+		aString := 'ABCDEFGHJKLMNOPQRST';
+	
+		TextFace([]);
+		with fGODocument.fdAbstHier^.DocumentInfo do
+			FOR i := 1 TO dNextMove-1 DO
+				with dGameRecord [i] do
+					BEGIN
+						mvPt := MovePoint;
+						vertCoord := ((i + 1) * kGameRowHeight) + kGameTitleHeight;
+						MoveTo (kMoveStart, vertCoord);
+						with mvPt^ do
+							begin
+								aChar := aString[XCoord];
+								DrawChar(aChar);
+								MoveTo (kColumnStart, vertCoord);
+								NumToString (YCoord, valString);
+							end;
+						DrawString (valString);
+					END;
+	(* ***
+		IF fCurrentPiece <> 0 THEN
+			InvertPiece(fCurrentPiece);
+			*** *)
+	END; {TGameView.Draw}
+	
+{$IFC DebugDraw}
+{$S ARes}
+PROCEDURE TDebugView.Draw (area: Rect); OVERRIDE;
+	BEGIN
+		if fGODocument <> NIL then
+			if fGODocument.fdAbstHier <> NIL then
+				with fGODocument, fdAbstHier^, DocumentInfo do
+					if fReadyForDebugDrawing then
+						if dReadyForGraphics and dWantGraphics then
+							case fDebugType of
+								StringsDebugView:
+									DrawStrings (@StringGraph, @DocumentInfo, area, 
+											gConfiguration.hasColorToolbox);
+								BlocksDebugView:
+									DrawBlocks (@BlockGraph, @DocumentInfo, area, 
+											gConfiguration.hasColorToolbox);
+								GroupsDebugView:
+									DrawGroups (@GroupGraph, @DocumentInfo, area, 
+											gConfiguration.hasColorToolbox);
+								AreasDebugView:
+									DrawAreas (@AreaGraph, @DocumentInfo, area, 
+											gConfiguration.hasColorToolbox);
+							end
+						else
+							writeln (' not dReadyForGraphics and dWantGraphics')
+					else
+						writeln (' not fReadyForDebugDrawing')
+			else
+				writeln (' not fGODocument.fdAbstHier <> NIL')
+		else
+			writeln (' not fGODocument <> NIL');
+	END; {TDebugView.Draw}
+
+{$S AClipboard}
+PROCEDURE TDebugView.WriteToDeskScrap;
+	BEGIN
+		INHERITED WriteToDeskScrap;
+	END; {TBoardView.WriteToDeskScrap}
+	
+{$S AOpen}
+PROCEDURE TDebugView.IDebugView (forClipBoard: Boolean; 
+						itsGODocument: TGODocument;
+						itsViewType: TDebugViewType);
+	VAR
+		viewRect: Rect;
+
+		aStdPrintHandler: TStdPrintHandler;
+	
+	BEGIN
+		fGODocument := itsGODocument;
+		fDebugType := itsViewType;
+		if fGODocument.fdAbstHier <> NIL then
+			with fGODocument.fdAbstHier^.DocumentInfo do
+				begin
+					SetRect (viewRect, 0{left},0{top},
+							dBoardSize*dBoxH + 2*dHorOffset{right},
+							dBoardSize*dBoxV + 2*dVerOffset{bottom});
+				end
+		else
+			begin
+				SetRect (viewRect, 0{left}, 0{top},
+						gDefaultBoardX{right},
+						gDefaultBoardY{bottom});
+				end;
+				
+		IView (NIL, itsGODocument, viewRect, sizeFixed, sizeFixed, 
+			True {can contain selection}, 
+			hlOff {highlighting off when inactive});
+
+		IF forClipboard THEN { see Draw Shapes Sample }
+			fWouldMakePICTScrap := TRUE
+		ELSE
+			BEGIN
+		{ see CookBook, p. 152 }
+				New(aStdPrintHandler);
+				FailNIL(aStdPrintHandler);
+				aStdPrintHandler.IStdPrintHandler(SELF, FALSE);
+			END;
+
+	END; {TDebugView.IDebugView}
+{$ENDC}
+
+{$S ARes}	
+PROCEDURE TDebugView.DoSetupMenus; OVERRIDE;
+	BEGIN
+		INHERITED DoSetupMenus;
+		Enable (cCopy, TRUE);
+	END; {TDebugView.DoSetupMenus}
+
+{$S ASelCommand}
+FUNCTION TDebugView.DoMenuCommand (aCmdNumber: CmdNumber): TCommand; OVERRIDE;
+	VAR
+		debugCopyCommand:	TDebugCopyCommand;
+	BEGIN
+		DoMenuCommand := gNoChanges;
+		CASE aCmdNumber OF
+			cCopy:
+				BEGIN
+					New(debugCopyCommand);
+					FailNil(debugCopyCommand);
+					debugCopyCommand.IDebugCopyCommand(aCmdNumber, SELF);
+					DoMenuCommand := debugCopyCommand;
+				END;
+			otherwise
+				DoMenuCommand := INHERITED DoMenuCommand(aCmdNumber);
+		END; {cases}
+	END; {TDebugView.DoMenuCommand}
+		
+{$S ASelCommand}
+PROCEDURE TMoveCommand.IMoveCommand;
+	BEGIN
+		with fcGODocument.fdAbstHier^.DocumentInfo do
+			begin
+				fOldBoardSize := dBoardSize;
+				fOldHandicap := dNumHandicap;
+				fOldTerms := dGameTerms;
+				fOldRules := dGameRules;
+			end;
+	END; {TMoveCommand.IMoveCommand}
+	
+{$S ADoCommand}
+PROCEDURE TMoveCommand.DoIt; OVERRIDE;
+	BEGIN
+	END; {TMoveCommand.DoIt}
+	
+{$S ADoCommand}
+PROCEDURE TMoveCommand.RedoIt; OVERRIDE;
+	BEGIN
+		case fCommandType of
+			MoveType:
+				begin
+				end;
+			PassType:
+				begin
+				end;
+			HandicapType:
+				begin
+				end;
+			SizeType:
+				begin
+				end;
+		end;
+	END; {TMoveCommand.RedoIt}
+	
+{$S ADoCommand}
+PROCEDURE TMoveCommand.UndoIt; OVERRIDE;
+	BEGIN
+		with fcGODocument.fdAbstHier^.DocumentInfo do
+			begin
+				case fCommandType of
+					MoveType:
+						begin
+						end;
+					PassType:
+						begin
+						end;
+					HandicapType:
+						begin
+							dNumHandicap := fOldHandicap;
+							dGameTerms := fOldTerms;
+						end;
+					SizeType:
+						begin
+						end;
+				end;
+			end;
+	END; {TMoveCommand.UndoIt}
+	
+{$S AOpen}
+PROCEDURE TGameView.IGameView (forClipBoard: Boolean; 
+								itsGODocument: TGODocument);
+
+	VAR r:					Rect;
+		aStdHandler:	TStdPrintHandler;
+
+	BEGIN
+		SetRect(r, 0, 0, 140, 210);
+		fGODocument := itsGODocument;
+		IView (NIL, itsGODocument, r, sizeFixed, sizeFixed, FALSE, hlOff);
+		fGODocument.fdGameView := SELF;
+	
+		(* ***
+		fCurrentPiece := 0; {No piece currently selected in the table}
+		*** *)
+	
+		New(aStdHandler);	{Allocate print handler for the game record}
+		FailNIL(aStdHandler);
+		aStdHandler.IStdPrintHandler(SELF, FALSE);
+	END; {TGameView.IGameView}
+
+{$S ADoCommand}
+PROCEDURE TGameTracker.IGameTracker(itsGameView: TGameView;
+									  itsPieceNumber: integer {xxx what is this?});
+	BEGIN
+		ICommand(cNoCommand);
+		fGameView := itsGameView;
+		(* ***
+		fGameView.fCurrentPiece := itsPieceNumber;
+		*** *)
+	END;
+
+{$S ADoCommand}
+PROCEDURE TGameTracker.TrackConstrain(anchorPoint, previousPoint: Point;
+									   VAR nextPoint: Point);
+	OVERRIDE;
+BEGIN
+	nextPoint.v := MAX(nextPoint.v, kGameTitleHeight + kGameRowHeight);
+END;
+
+{$S ADoCommand}
+PROCEDURE TGameTracker.TrackFeedback(anchorPoint, nextPoint: Point;
+									turnItOn, mouseDidMove: BOOLEAN); OVERRIDE;
+	(* ***
+	VAR putativePiece:	INTEGER;
+		aPieceNumber:	PieceNumber;
+		*** *)
+BEGIN
+	INHERITED TrackFeedback (anchorPoint, nextPoint, turnItOn, mouseDidMove);
+	(* ***
+	IF mouseDidMove THEN
+		BEGIN
+		putativePiece := (nextPoint.v - kGameTitleHeight) DIV kGameRowHeight;
+		aPieceNumber := Max(Min(putativePiece, 15), 0);
+		IF aPieceNumber <> fGameView.fCurrentPiece THEN
+			BEGIN
+			fGameView.InvertPiece(fGameView.fCurrentPiece);
+			fGameView.fCurrentPiece := aPieceNumber;
+			fGameView.InvertPiece(fGameView.fCurrentPiece);
+			END;
+		END;
+		*** *)
+END; {TGameTracker.TrackFeedback}
+
+
+{$S ADoCommand}
+FUNCTION  TGameTracker.TrackMouse (aTrackPhase: TrackPhase;
+					VAR anchorPoint, previousPoint, nextPoint: Point;
+					mouseDidMove: BOOLEAN): TCommand; OVERRIDE;
+	(* ***
+	VAR sourceRow:		Coord;
+		sourceCol:		Coord;
+		aCmd:			TMoveCommand;
+		aPieceNumber:	PieceNumber;
+		aGODocument:	TGODocument;
+		putativePiece:	INTEGER;
+		*** *)
+BEGIN
+	TrackMouse := INHERITED TrackMouse (aTrackPhase, 
+			anchorPoint, previousPoint, nextPoint, mouseDidMove);
+	(* ***
+	IF aTrackPhase = trackPress THEN
+		{Start the inversion process}
+		fGameView.InvertPiece(fGameView.fCurrentPiece)
+	ELSE IF aTrackPhase = trackRelease THEN
+		BEGIN
+			TrackMouse := gNoChanges;
+			aGODocument := fGameView.fGODocument;
+			putativePiece := (nextPoint.v - kGameTitleHeight) DIV kGameRowHeight;
+			IF (putativePiece > 0) AND (putativePiece < 16) THEN
+				BEGIN
+					aPieceNumber := putativePiece;
+					aGODocument.FindCoord(aPieceNumber, sourceRow, sourceCol);
+					IF aGODocument.CanMove(sourceRow, sourceCol) THEN
+						BEGIN
+							New(aCmd);
+							FailNIL(aCmd);
+							aCmd.IMoveCommand(aGODocument, aGODocument.fGOView,
+												sourceRow, sourceCol);
+							TrackMouse := aCmd;
+						END
+					ELSE
+						SysBeep(0); {User requested illegal move -- beep at him}
+				END;
+			{Turn feedback off for good}
+			fGameView.InvertPiece(fGameView.fCurrentPiece);
+			fGameView.fCurrentPiece := 0;	{no more current piece}
+		END;
+		*** *)
+END; {TGameTracker.TrackMouse}
+
+
+{$S AOpen}
+PROCEDURE TStyleDialog.IStyleDialog (itsGODocument: TGODocument);
+	BEGIN
+		fvGODocument := itsGODocument;
+		IDialogView(itsGODocument, NIL, kStyleWindowID, 3, 0, FALSE);
+	END; {TStyleDialog.IStyleDialog}
+
+{$S ADoCommand}
+FUNCTION TStyleDialog.DoItemSelected (anItem: INTEGER; VAR handledIt: BOOLEAN;
+		VAR doneWithDialog: BOOLEAN): TCommand; OVERRIDE;
+	VAR newStyle:	Style;
+		aRect:		Rect;
+	BEGIN
+		DoItemSelected := INHERITED DoItemSelected(anItem, handledIt,
+													 doneWithDialog);
+	
+		IF anItem = 1 THEN
+			newStyle  := []
+		ELSE IF anItem = 2 THEN
+			newStyle := [bold]
+		ELSE
+			Exit(DoItemSelected);
+		(* **** do the board size adjustments around here:
+		IF fvGODocument.fDisplayState.theStyle <> newStyle THEN
+			BEGIN
+				fvGODocument.fDisplayState.theStyle := newStyle;
+				fvGODocument.RedrawPuzzle;
+				fvGODocument.fChangeCount := fvGODocument.fChangeCount + 1;
+			END;
+			**** *)
+
+	END; {TStyleDialog.DoItemSelected}
+	
+
+{$S AOpen}
+PROCEDURE TGameWindow.IGameWindow (itsWmgrWindow: WindowPtr;
+									itsGODocument: TGODocument);
+	VAR aFrame: 		TFrame;
+		r:						Rect;
+		aView:				TView;
+		aLocation:		Point;
+		aRect:				Rect;
+
+BEGIN
+	IWindow (itsGODocument, itsWmgrWindow, NOT kDialogWindow, TRUE, TRUE, TRUE);
+	fDisposeOnFree := TRUE;
+
+	NEW (aFrame);
+	FailNIL (aFrame);
+
+	r := gZeroRect;
+	aFrame.IFrame (SELF, SELF, r, NOT kWantHScrollBar, kWantVScrollBar,
+		kHFrResize, kVFrResize);
+
+	aView := itsGODocument.fdGameView;
+	aFrame.HaveView (aView);
+	fTarget := aView;
+
+	fWouldCloseDoc := FALSE;
+	fFreeOnClosing := FALSE;
+
+	CalcWindowRect (itsGODocument.fdBoardWindow, aRect);
+	if DebugWindowSize then
+		begin
+			writeln('TGameWindow.IGameWindow: CalcWindowRect (itsGODocument.fdBoardWindow');
+			writeln ('   gDefaultBoardX, gDefaultBoardY = ',
+				aRect.left:1, ', ', aRect.top:1);
+		end;
+
+	WITH aLocation DO
+		BEGIN
+			h := (aRect.left + 120);
+			IF h > screenBits.bounds.right THEN
+				h := h - 220;
+			v := aRect.top;
+		END;
+	MoveWindow(fWmgrWindow, aLocation.h, aLocation.v, FALSE);
+
+END; {TGameWindow.IGameWindow}
+
+{$S ANonRes}
+PROCEDURE TGameWindow.GetResizeLimits (VAR sizeRect: Rect); OVERRIDE;
+	BEGIN
+		SetRect (sizeRect, 156, 80, 156, 226);
+		{Constrains the window always to be exactly 156 pixels wide, and
+			between 80 and 226 pixels high}
+	END; {TGameWindow.GetResizeLimits}
+
+{$S ASelCommand}
+PROCEDURE TBoardCopyCommand.IBoardCopyCommand
+						(itsCmdNumber: CmdNumber;
+						 itsBoardView: TBoardView);
+	BEGIN
+		ICommand(itsCmdNumber);
+		fBoardView := itsBoardView;
+		fBoardDocument := itsBoardView.fGODocument;
+		
+		fChangesClipboard := TRUE;
+		fCausesChange := itsCmdNumber = cCut;
+	END; {TBoardCopyCommand.IBoardCopyCommand}
+
+
+{$S ADoCommand}
+PROCEDURE TBoardCopyCommand.DoIt;
+	VAR
+		copyView:	TBoardView;
+	BEGIN
+		copyView := fBoardDocument.SetUpForClipBoard;
+		gApplication.ClaimClipboard (copyView);
+		
+	END; {TBoardCopyCommand.DoIt}
+
+{$S ADoCommand}
+PROCEDURE TBoardCopyCommand.RedoIt;
+
+	BEGIN
+		INHERITED RedoIt;
+	END;
+
+{$S ADoCommand}
+PROCEDURE TBoardCopyCommand.UndoIt; OVERRIDE;
+
+	BEGIN
+		INHERITED RedoIt;
+	END;
+(* ***
+PROCEDURE TBoardCopyCommand.Commit; OVERRIDE;
+*** *)
+
+
+{$S ASelCommand}
+PROCEDURE TDebugCopyCommand.IDebugCopyCommand
+						(itsCmdNumber: CmdNumber;
+						 itsDebugView: TDebugView);
+	BEGIN
+		ICommand(itsCmdNumber);
+		fDebugView := itsDebugView;
+		fDebugDocument := itsDebugView.fGODocument;
+		
+		fChangesClipboard := TRUE;
+		fCausesChange := itsCmdNumber = cCut;
+	END; {TDebugCopyCommand.IDebugCopyCommand}
+
+
+{$S ADoCommand}
+PROCEDURE TDebugCopyCommand.DoIt;
+	VAR
+		copyView: TBoardView;
+		
+		aDebugView: TDebugView;
+
+	BEGIN
+		copyView := fDebugDocument.SetUpForClipBoard;
+		
+		New (aDebugView);	
+		FailNIL (aDebugView);	
+		aDebugView.IDebugView (TRUE, copyView.fGODocument, fDebugView.fDebugType);
+		
+		case fDebugView.fDebugType of
+			StringsDebugView:
+				begin
+					copyView.fGODocument.fdStringsView := aDebugView;
+				end;
+			BlocksDebugView:
+				begin
+					SetGOAbstHierLevel (copyView.fGODocument.fdAbstHier, StringsGraphLevel); 
+					copyView.fGODocument.fdBlocksView := aDebugView;
+				end;
+			GroupsDebugView:
+				begin
+					SetGOAbstHierLevel (copyView.fGODocument.fdAbstHier, BlocksGraphLevel);
+					copyView.fGODocument.fdGroupsView := aDebugView;
+				end;
+			AreasDebugView:
+				begin
+					SetGOAbstHierLevel (copyView.fGODocument.fdAbstHier, GroupsGraphLevel);
+					copyView.fGODocument.fdAreasView := aDebugView;
+				end;
+		end;
+		
+		copyView.fGODocument.fReadyForDebugDrawing := TRUE;
+
+		gApplication.ClaimClipboard (aDebugView);
+		
+	END; {TDebugCopyCommand.DoIt}
+
+{$S ADoCommand}
+PROCEDURE TDebugCopyCommand.RedoIt;
+
+	BEGIN
+		INHERITED RedoIt;
+	END;
+
+{$S ADoCommand}
+PROCEDURE TDebugCopyCommand.UndoIt; OVERRIDE;
+
+	BEGIN
+		INHERITED RedoIt;
+	END;
+(* ***
+PROCEDURE TDebugCopyCommand.Commit; OVERRIDE;
+*** *)

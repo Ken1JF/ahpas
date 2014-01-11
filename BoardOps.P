@@ -1,0 +1,383 @@
+{	BoardOps		Pascal Unit
+
+	DESCRIPTION
+		BoardOps -- Supports dBoard definition, handicaps, drawing, and
+					printing.
+
+	AUTHOR
+			Ken Friedenbach
+			Copyright 1986, 1987
+			All Rights Reserved.
+
+	BUGS
+	1.	Does not support partial boards yet.
+	
+	IMPROVEMENTS
+	1.	Printing on Imagewriter is elongated.  Might improve with slightly
+		smaller dBoxV.
+	2.	Courier may not be best font on Imagewriter, Geneva might be better,
+		i.e. be less jaggy.
+	3.	Courier may not be best font on Laserwriter, Helvetica might give
+		closer spacing.
+	4.	Might be better to do two DrawChar's rather than DrawString.
+}
+
+{$I Flags.p} {Global options for compilations}
+
+UNIT BoardOps;
+
+INTERFACE
+
+USES 
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	GraphOps, Utilities; 
+
+const
+	MaxBoxH = 20;
+	MaxBoxV = 20;
+	MaxHorOffset = 24; { 4 for spacing + 20 for Lettering/Numbering }
+	MaxVerOffset = 24;
+	MaxBoardSize = 19;
+	HalfBoardSize = 10;
+	MaxMoveRecord = 435; { roughly 19 x 19 + 20% }
+
+		{ PtType encodings: }
+		{ based on dBoardSize, dHoshiLine, dNumHoshi, XCoord, YCoord }
+	OffBoard = 0;
+	TpRtCorner = 1;
+	TpLfCorner = 2;
+	BtLfCorner = 3;
+	BtRtCorner = 4;
+	LftEdge = 5;
+	RhtEdge = 6;
+	TopEdge = 7;
+	BotEdge = 8;
+	Hoshi = 9;
+	Center = 10;
+
+{$IFC not TraceRequest} 
+	gTraceRequest = false;
+{$ENDC}
+	
+
+		{ Occupation status: }
+type		 
+	TOccStatus = ( {level 0, i.e. OccStatus} UnknownOcc, BlackOcc, WhiteOcc, UnOcc, 
+						{level 1, i.e. PtStrType.PtOcc} LibertyOcc);
+	
+const
+	CornerLine = 11; {max. MidPt + 1}
+	EdgeLine = 12;
+	MidLine = 13;
+
+
+	UndefinedState = -2; 
+		{	Used in AbstHier to indicate a temporary node. 
+			Not seen outside of ChangeState and the Coloring Functions. }
+		{	A rather tricky value! UnOcc, unique, etc. }
+		{	Note: tests of PtOcc that are not guarded by tests for Undefined
+			could get confused. }
+	
+type
+		{ PtStrType encodings: }
+		{ based on OccStatus, XCoord, YCoord, and dBoardSize }
+			{ for Occupied points: }
+		{ xxxx is it a problem that PtStateInt = 0 is a BlackStone, rather
+			than "Undefined" as required by the specification? Perhaps this
+			is why certain operations at the PointGraph level never worked,
+			and required code to do the equivalent at the strings level. }
+	BWAdjCode =   (B0W0, { no adj. stones, used for non-liberty points }
+						B0W1, B1W0, { single adj. stones }
+						B0W2, B1W1, B2W0, { 2 adj. stones }
+						B3W0, B2W1, B1W2, B0W3, { 3 adj. stones }
+						B4W0, B3W1, B2W2, B1W3, B0W4); { 4 adj. stones }
+	PointHighState =
+		packed record
+		case Boolean of
+			true: (
+				BlAdjWhAdj: BWAdjCode;
+				Lin1, Lin2: 1..13;
+				PtOcc: TOccStatus;
+			);
+			false: (
+				PtStateInt: integer;
+			)
+		end; {PointHighState}
+		
+const
+	
+	DefaultBlackPlayer = 'Sente GO 1.0';
+	DefaultWhitePlayer = 'Human';
+
+type
+	AnalysisType = (AtariAnalysis, LadderAnalysis, GetaAnalysis);
+
+	p2GOPoint = ^TGOPoint;
+	TGOPoint = 
+		record
+				{ portion of the standard Graph Node: }
+			PtNode: p2Node; {p2GOString}
+			NextPtSameString: p2GOPoint;
+			PtStrType: PointHighState;
+			PtMarked: Boolean;
+			Filler: Boolean;
+				{ point specific information: }
+			RequestCheck: array [PointsGraphLevel..AreasGraphLevel] of Boolean;
+			AnalysisResult: p2Analysis;
+ 	      AnalysisInvalidated : p2ListItem;   { A change of OccStatus here could 
+																invalidate these Analyses. }
+			StoneMark: integer;		{ number or mark on stone for Drawing }
+			OccStatus: TOccStatus; {Black, White, or UnOcc only}
+			PtType: integer;
+			XCoord, YCoord: 1..MaxBoardSize;
+			Line: 0..HalfBoardSize;
+			Line2: 0..HalfBoardSize;
+			NearestSide: OffBoard..BtRtCorner;
+			NextNearSide: OffBoard..BtRtCorner; { ties go to Upper and Lower }
+			MoveIndex: integer;		{ index into the dGameRecord array }
+		end;
+	TGOBoard = array[1..MaxBoardSize, 1..MaxBoardSize] of TGoPoint;
+	
+	p2GOMove = ^TGOMove;
+	TGOMove = 
+		record
+				{ move information: }
+			MovePoint: p2GOPoint;	{ point where move was played }
+									{ nil if Pass }
+			MoveColor: TOccStatus;	{ BlackOcc or WhiteOcc if MovePoint <> nil }
+			KoPoint: p2GOPoint;		{ <> nil if this was a Ko capture }
+				{ capture and captured by information: }
+				{ indices into dGameRecord array, 0 is nil }
+			FirstCapture: integer;	{ head of list captures by this move }
+			CapturedBy: integer;	{ index of move that captured this move } 
+			nextCapture: integer;	{ next in list of moves, same CapturedBy }
+		end;
+	TGameRecord = array [0..MaxMoveRecord] of TGOMove;
+		{ 0 record either not used, or used to encode state info in file }
+ 
+	TDocType = (DocGame, DocProblem, DocJoseki);
+	TGameTerms = (EvenGame, StonesHandicap, KomiHandicap, PassesHandicap);
+	TGameRules = (UnknRules, JapaneseRules, ChineseRules);
+	TDocStr = string [79]; { later: more specific?? }
+	
+	TJosekiState = 
+		(AtBegin, 	{ No move made in this corner yet }
+		 OnCurr, 	{ Last Move on the tree }
+		 BelowCurr, { On the tree, below a "Tenuki" (pass) node }
+		 OffCurr, 	{ Last "Tenuki" move not on Tree }
+		 OffTree);	{ One or more moves made, not on tree }
+		 
+	TJosekiControl =
+		record
+			JosekiState: TJosekiState;
+			FirstMove: TOccStatus;
+			JosekiTree: p2JosekiTreeNode;
+			prevJosekiTree: p2JosekiTreeNode; {used to save and restore across "Tenuki" }
+				{ only needs to be valid when JosekiState = BelowCurr or OffCurr }
+		end;
+
+	TShowJoseki = (HideJoseki, EditOneJoseki, ShowAllJoseki);
+
+	p2DocInfo = ^TDocInfo;
+	TDocInfo = record
+			{ Communication variables with MacApp and other environments: }
+		dReadyForGraphics: Boolean;
+		dWantGraphics: Boolean;
+			{ common header: }
+		dFormat: integer; { should be 1 }
+			{ external information }
+		dDate: str255;
+		dPlace: TDocStr;
+			{ game. later: joseki dictionary, etc. }
+		dType: TDocType;
+			{ external information }
+		dTitle: str255;
+		
+			{ game specific: external information }
+		dBlackPlayer, 
+		dWhitePlayer: TDocStr;
+	
+		dNumHandicap: integer;	{ Size of Handicap taken by Black, 0 if even game }
+								{ xx limited to number of Hoshi points }
+								{ ?? -n if Chinese style, i.e. n White passes }
+		dGameTerms: TGameTerms;
+		dBlackToPlay: Boolean;	{ true if Black is next, false if White }
+								{ xx either? for "Status" type problems? }
+		dNextStone: integer;		{ number of next stone to be placed }
+		dFirstNumber: integer;	{ index of first stone to number }
+			{ only stones between dFirstNumber and dNextMove-1 are numbered }
+		dNextMove: integer;		{ number of next move to make }
+		
+		dNumKomi: integer;		{ normally 4 or 5, tie goes to White }
+			{ xx need opponents strength }
+			{ xx need whether machine is playing Black, White, niether or both. }
+		dGameRules: TGameRules;
+
+			{ Variables controlling dBoard Drawing, sizes in screen pixels }
+		dBoxH: integer;			{ horizontal width of a single stone/point }
+		dBoxV: integer;			{ vertical heigth of a single stone/point }
+		dHorOffset: integer;		{ amount of white space on left and right of dBoard } 
+		dVerOffset: integer;		{ amount of white space on top and bottom of dBoard }
+
+			{ Variables controlling the dBoard Configuration, and terms of play }
+		dBoardSize: integer;		{ Size of dBoard (partial boards embedded) }
+		dMidPt: integer;			{ (dBoardSize+1) div 2 } { xx should this be local? }
+		dHoshiLine: integer;		{ Line that Hoshi points are on (3 or 4) }
+		dNumHoshi: integer;		{ Number of Hoshi points on dBoard (4, 5, or 9) }
+		
+		dLabelBoard: Boolean;	{ true if rows and columns are to be labelled }
+		dNumberStones: Boolean;	{ true if stones are to be numbered }
+		dMachinePlaying: Boolean;	{ true if Machine is making moves. }
+								{ xx limited to numbering from 1 (2 if Handicap) }
+	
+		dGameRecord: TGameRecord; 	{ 5,220 bytes @ 12 per }
+
+			{ xxx later: problem specific: }
+		
+
+
+			{ xxx later: joseki specific: }
+
+
+
+			{ State of dBoard during play }
+			{ for now: static global variables. }
+			{ xx later?? dynamic to on small boards on small Macs?? }
+		dBoard: TGoBoard;			{ 9,386 bytes @ 26 per }
+		dUpdateLevel: TGraphLevel; { current update level for abstraction hierarchy }
+		dCurJoseki: p2JosekiTreeNode; { used for editing, current level in tree }
+		dDisplayJoseki: TShowJoseki;
+		dNormalJoseki: array [TpRtCorner..BtRtCorner] of TJosekiControl;
+		dReflectJoseki: array [TpRtCorner..BtRtCorner] of TJosekiControl;
+		dKoPoint: p2GOPoint; 	{ set by a Ko capture, nil if last move not a Ko }
+		dAnalysisPoints: p2ListItem; { set of points for doing analysis }
+			{ Controlled by calls to BeginInvalidate, ContinueInvalidate, and
+				EndInvalidate (in StringKill2.p) }
+			{ The points on this list are representatives of strings of stones. }
+		dCapStone: p2GOPoint;	{ set if playing a stone Captures some strings, }
+			{ should not be part of the global state, but ... }
+								{ i.e. one of the stones captured. }
+								{ nil if stone does not capture }
+	end; {TDocInfo}
+	
+VAR
+	gJosekiTree: p2JosekiTreeNode; { root of the Joseki tree (or nil) }
+
+	SmallScreen: Boolean; { True if 19x19 Board must be forced to 16 pixals }
+{$IFC TraceRequest} 
+	gTraceRequest: Boolean;
+{$ENDC}
+
+procedure InitDocInfo (var Doc: TDocInfo; siz: integer; hnd: integer; 
+		InitStrNode: p2Node; forReplay: Boolean);
+
+procedure SetUpHandicap (pDoc: p2DocInfo; n: integer; 
+				procedure ReportHandicap (pDoc: p2DocInfo; p: p2GOPoint; doAdjChk: Boolean));
+
+procedure StartJosekiManagers (pDoc: p2DocInfo; aJosekiTree: p2JosekiTreeNode);
+
+function MakeMove (pDoc: p2DocInfo; atPt: p2GOPoint) :integer;
+	{ atPt is an unoccupied point. }
+	{ returns: }
+	{ 0 if point was a legal move. }
+	{ 3 if point is illegal suicide move. }
+	{ 4 if point is illegal Ko move. }
+	{ Sets global variables if 0 is returned: }
+	{ dCapStone = nil if move does not capture anything, <> nil otherwise }
+	{ dCapStone is p2GOPoint, i.e. one of the stones captured. }
+	{ dKoPoint = nil, not a Ko capture, otherwise, point which was captured. }
+	{ dBlackToPlay is toggled. }
+	{ Move is recorded in BoardRecord. }
+
+procedure Capture (pDoc: p2DocInfo; 
+		procedure NotifyOfCapture (pDoc: p2DocInfo; p: p2GOPoint; doAdjChk: Boolean));
+	{ Capture assumes that last move in dGameRecord is the point }
+	{ Question: how to "draw"? i.e. call InvalRect? }
+	{ Answer (for now): pass in a "notify" procedure. }
+	
+procedure EachAdjPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+			
+procedure EachDiagPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+procedure EachSkipOnePoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+procedure EachKnghtPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+procedure EachSkipTwoPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+procedure EachLongKnghtPoint (pDoc: p2DocInfo; p: p2GOPoint; 
+			procedure Visit (pDoc: p2DocInfo; p2: p2GOPoint));
+
+function CompPtState (pDoc: p2DocInfo; p: p2GOPoint): integer;
+
+function CallComputeHigh (pDoc: p2DocInfo; g: p2Graph; p: p2Node; pProc: ProcPtr): integer;
+	{ call ComputeHigh functions through a ProcPtr }
+
+function CallComputeNew (pDoc: p2DocInfo; g: p2Graph; p: p2Node; pProc: ProcPtr): integer;
+	{ call ComputeNew functions through a ProcPtr }
+
+function NumLiberties (p: p2Node {GOString}): integer;
+	{ count the number of liberties of a stone string }
+
+procedure CountPrisoners (pDoc: p2DocInfo;
+								  var WhiteCapturedByBlack: integer;
+								  var BlackCapturedByWhite: integer);
+	{ examine dGameRecord from 1 to dNextMove-1. }
+	{ count stones that have been captured. }
+
+procedure BreadFirstSearch (pDoc: p2DocInfo; g: p2Graph; startNod: p2Node; 
+		function IsTarget (n: p2Node; var Continue: Boolean): Boolean;
+			{ n is a node to Test for inclusion in BFS. }
+			{ returns true if n is to be Stacked, false otherwise. }
+			{ sets Continue to false, if search should stop. }
+		var BFSStack: p2ListItem);
+	{ does breadth first search on a graph, starting from startNode. }
+	{ stacks the nodes for future use in order encountered, including startNode. }
+	{ IsTarget is a parametric function used to distinguish target nodes. }
+	{ Assumes the Marked fields of Nodes are initially cleared. }
+	{ Marks elements as stacked, and clears marks at end of search. }
+
+	{ Requests for Changes }
+
+procedure RequestChange (g: p2Graph; pt: p2GOPoint);
+	{ Request that a check for a change in state be recorded for this object }
+
+function NumCaptures (pDoc: p2DocInfo; move: integer): integer;
+	{ counts the number of stones captured by a move in the Game Record }
+
+		{ Joseki Stuff }
+procedure EachJosekiMgr (pDoc: p2DocInfo; 
+				procedure Visit (var JTree: TJosekiControl; corn: integer; isReflect: Boolean));
+	{ Execute a procedure for each of the JosekiMgr's }
+
+		{ MoveTreeNode Stuff }
+procedure NewMoveTreeNode (g: p2Graph; var root: p2TreeNode; pt: p2GOPoint);
+	{ Create a new tree node. }
+	{ initialize the pointer fields to nil and the coordinate fields to zero. }
+	{ g is used to distinguish different flavors of TreeNodes: }
+	{  PointGraph: "normal" TreeNodes. }
+	{  StringGraph: Joseki TreeNodes. }
+
+procedure PrintPointItem (p: p2Node);
+	{ write 'pass' for nil, or	call WritePoint to write coordinates }
+
+procedure PrintPointList (l : p2ListItem);
+	{ write a list of points, separated by commas }
+
+procedure PrintAnalPointItem (Anal : p2Analysis);
+	{ Print an analysis record. }
+	
+procedure PrintAnalPointList (List : p2ListItem);
+	{ Print a list of analysis records. }
+	
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I BoardOps2.p}
+END. {GOBoards}

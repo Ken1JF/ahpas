@@ -1,0 +1,21 @@
+	{$IFC RangeChk}
+		{$R+}
+	{$ELSEC}
+		{$R-}
+	{$ENDC}
+	
+	{$IFC DebugSym}
+		{$D+}
+		{$N+}
+	{$ELSEC}
+		{$R-}
+		{$N-}
+	{$ENDC}
+	
+	{$IFC ExtraChks}
+		{$OV+}	{Check for arithmetic overflows}
+		{$H+}		{Check dereferencing of Handles}
+	{$ELSEC}
+		{$H-}		{Don't Check dereferencing of Handles}
+		{$OV-}	{Check for arithmetic overflows}
+	{$ENDC}

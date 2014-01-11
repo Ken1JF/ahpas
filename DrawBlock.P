@@ -1,0 +1,860 @@
+CONST
+	VariableSizeRects = FALSE;
+
+var
+		Sum_XCoords: integer;	{ Sum of XCoord values for elements }
+		Sum_YCoords: integer;	{ Sum of YCoord values for elements }
+		Count_elements: integer;	{ Count of elements }
+
+{$IFC qTrace}{$D+}{$ENDC}
+procedure CalcCenter (p2: p2Node);
+	var
+		p2s: p2GoPoint; { same as p2, but type is known to be a point }
+	begin
+		p2s := p2GoPoint (p2);
+		with p2s^ do
+			begin
+				Sum_XCoords := Sum_XCoords + XCoord;
+				Sum_YCoords := Sum_YCoords + YCoord;
+				Count_elements := Count_elements + 1;
+			end;
+	end; {CalcCenter}
+
+CONST
+	SCALE = 4;	{ Scale factor for calculations of center }
+	INSET = 4;	{ Amount to inset normal drawing rect, to leave room for arcs }
+var
+	TargetString: p2Node;
+	MinDist: integer;
+					
+procedure FindClosest (p2: p2Node);
+	var
+		p2s: p2GoPoint; { same as p2, but type is known to be a point }
+		testDist: integer;
+	begin
+		p2s := p2GoPoint (p2);
+		with p2s^ do
+			testDist := 
+				abs((XCoord * SCALE) - Sum_XCoords) +
+				abs((YCoord * SCALE) - Sum_YCoords);
+		if testDist < MinDist then
+			begin
+				TargetString^.TheCenter := p2;
+				MinDist := testDist;
+			end;
+	end; {FindClosest}
+
+procedure DrawStrings (g: p2graph; pDoc: p2DocInfo; area: Rect; HasColor: Boolean);
+	var		
+		lft, rght, tp, bttm: integer;
+		r: Rect;
+		
+		BoxX, BoxY, HOff, VOff: integer;
+		BSize: integer;
+		
+		LowS: PointHighState;
+		HighS: StringHighState;
+	
+	procedure DrawArc (p1, p2: p2GoPoint);
+		var
+			X,Y: integer;
+		begin
+			with p1^ do
+				begin
+					X := BoxX * (XCoord - 1) + HOff + BoxX div 2;
+					Y := BoxY * (BSize - YCoord) + VOff + BoxY div 2;
+					MoveTo (X, Y);
+				end;
+			with p2^ do
+				begin
+					X := BoxX * (XCoord - 1) + HOff + BoxX div 2;
+					Y := BoxY * (BSize - YCoord) + VOff + BoxY div 2;
+					LineTo (X, Y);
+				end;
+		end; {DrawArc}
+		
+	procedure DrawSArcs (p2: p2Node);
+		var
+			p2Cen, TargCen: p2GoPoint;
+		begin
+			p2Cen 		:= p2GoPoint (p2^.TheCenter);
+			TargCen 	:= p2GoPoint (TargetString^.TheCenter);
+			if ord4(p2Cen) <= ord4(TargCen) then {don't draw twice!}
+				DrawArc (p2Cen, TargCen);
+		end; {DrawSArcs}		
+	
+	procedure CalcStrCenters (s: p2Node);
+		begin
+			Sum_XCoords := 0;
+			Sum_YCoords := 0;
+			Count_elements := 0;
+			EachElement (s, CalcCenter);
+			s^.TheCenter := s^.Child;
+			if Count_elements > 1 then
+				begin
+					Sum_XCoords := (Sum_XCoords * SCALE) div Count_elements;
+					Sum_YCoords := (Sum_YCoords * SCALE) div Count_elements;
+					{ Calculate Center accurate to 1/SCALE units }
+					with p2GoPoint(s^.TheCenter)^ do
+						MinDist := 
+							abs((XCoord * SCALE) - Sum_XCoords) +
+							abs((YCoord * SCALE) - Sum_YCoords);
+					TargetString := s;
+					EachElement (s, FindClosest);
+				end;
+		end; {CalcStrCenters}
+		
+	procedure DrawStrArcs (s: p2Node);
+		begin
+			TargetString := s;
+			{Draw node at TheCenter}
+			(* ***
+			with pDoc^, p2GoPoint(s^.TheCenter)^ do
+				begin
+					{ xxx Share this code with DrawBoard for portability?}
+					lft := dBoxH * (XCoord - 1) + dHorOffset;
+					rght := lft + dBoxH;
+					tp := dBoxV * (dBoardSize - YCoord) + dVerOffset;
+					bttm := tp + dBoxV;
+					SetRect (r, lft, tp, rght, bttm);
+					InsetRect (r, INSET, INSET);
+					PenNormal;
+					PenSize (1, 1);
+					EraseOval (r);
+					FrameOval (r);
+				end;
+				*** *)
+			EachAdjNode (s, DrawSArcs)
+		end; {DrawStrArcs}
+	
+	procedure ColorStrCenters (s: p2Node);
+		var nm: integer;
+		begin
+			with pDoc^, p2GoPoint(s^.TheCenter)^ do
+				begin
+					{ xxx Share this code with DrawBoard for portability?}
+					lft := dBoxH * (XCoord - 1) + dHorOffset;
+					rght := lft + dBoxH;
+					tp := dBoxV * (dBoardSize - YCoord) + dVerOffset;
+					bttm := tp + dBoxV;
+					SetRect (r, lft, tp, rght, bttm);
+					nm := -NumElements (s);
+					if VariableSizeRects then
+						if nm < -1 then
+							if nm > -10 then
+								InsetRect (r, nm+1, nm+1)
+							else
+								InsetRect (r, -12, -12);
+					InsetRect (r, INSET, INSET);
+					PenNormal;
+					PenPat (black);
+					if DoColorDrawing and HasColor then
+							RGBForeColor (GOColors[BStrSafeBlack]);
+					EraseOval (r);
+					LowS.PtStateInt := s^.LowState;
+					HighS.StrStateInt := s^.HighState;
+					
+					case LowS.PtOcc of
+						BlackOcc:
+							if DoColorDrawing and HasColor then
+								begin
+									PenNormal;
+									case HighS.StrSafety of
+										UnknStrSafety:
+											RGBForeColor (GOColors[BStrSafeBlack]);
+										EstSafeStr:
+											RGBForeColor (GOColors[BStrSafeBlack]);
+										Lib_3_Safety:
+											RGBForeColor (GOColors[BStrL3DkRed]);
+										Lib_2_Safety:
+											RGBForeColor (GOColors[BStrL2DeepRed]);
+										Lib_1_Safety:
+											RGBForeColor (GOColors[BStrL1RubyRed]);
+										StonesStrSafe:
+											RGBForeColor (GOColors[BStrSafeBlack]);
+										StonesStrDead:
+											RGBForeColor (GOColors[WStrL3LtPink]);
+										StonesStrUnsettled:
+											RGBForeColor (GOColors[BStrL1RubyRed]);
+										StonesStrTooComplex:
+											RGBForeColor (GOColors[BStrL1RubyRed]);
+									end;{Black cases}
+									PaintOval (r);
+								end
+							else
+								begin
+									PenNormal;
+									PaintOval (r);
+								end;
+						WhiteOcc:
+							if DoColorDrawing and HasColor then
+								begin
+									PenNormal;
+									FrameOval (r);
+									InsetRect (r, 1, 1);
+									case HighS.StrSafety of
+										UnknStrSafety:
+											RGBForeColor (GOColors[BStrSafeBlack]);
+										EstSafeStr:
+											RGBForeColor (GOColors[WStrSafeWhite]);
+										Lib_3_Safety:
+											RGBForeColor (GOColors[WStrL3LtPink]);
+										Lib_2_Safety:
+											RGBForeColor (GOColors[WStrL2MedPink]);
+										Lib_1_Safety:
+											RGBForeColor (GOColors[WStrL1BrtPink]);
+										StonesStrSafe:
+											RGBForeColor (GOColors[WStrSafeWhite]);
+										StonesStrDead:
+											RGBForeColor (GOColors[BStrL3DkRed]);
+										StonesStrUnsettled:
+											RGBForeColor (GOColors[WStrL1BrtPink]);
+										StonesStrTooComplex:
+											RGBForeColor (GOColors[WStrL1BrtPink]);
+									end; {White cases}
+									FrameOval (r);
+								end
+							else
+								begin
+									PenNormal;
+									FrameOval (r);
+								end;
+									
+						UnOcc:
+							case LowS.Lin1 of
+								1,2:	begin
+											PenPat (dkgray);
+											PaintRect (r);
+										end;
+								3,4:	begin
+											PenPat (ltgray);
+											PaintRect (r);
+										end;
+								5,6:	begin
+											PenPat (gray);
+											PaintRect (r);
+										end;
+								otherwise	
+										begin
+											PenPat (dkgray);
+											PaintRect (r);
+										end;
+							end; {cases}
+							
+						LibertyOcc:
+							begin
+								PenPat (gray);
+								PaintOval (r);
+							end;
+					end; {case LibS.LibType}
+
+				end; {cases}
+		end; {ColorStrCenters}
+			
+	begin {DrawStrings}
+		with pDoc^ do
+			begin
+				BoxX := dBoxH;
+				BoxY := dBoxV;
+				HOff := dHorOffset;
+				VOff := dVerOffset;
+				BSize := dBoardSize;
+				if DoColorDrawing and HasColor then
+						SetUpColors;
+				EachGOGraphNode (g, CalcStrCenters);
+				EachGOGraphNode (g, DrawStrArcs);
+				EachGOGraphNode (g, ColorStrCenters);
+			end; {with pDoc^}	
+		PenNormal;
+		PenPat (black);
+		if DoColorDrawing and HasColor then
+			RGBForeColor (GOColors[BStrSafeBlack]);
+	end; {DrawStrings}
+	
+procedure CallCalcCenter (s: p2Node);
+	begin
+		EachElement (s, CalcCenter);
+	end; {CallCalcCenter}
+
+procedure CallFindClosest (s: p2Node);
+	begin
+		EachElement (s, FindClosest);
+	end; {CallFindClosest}
+	
+var
+	TargetBlock: p2Node;
+
+procedure DrawBlocks 
+		(g: p2graph; 
+		pDoc: p2DocInfo; 
+		area: Rect; 
+		HasColor: Boolean);
+	
+	var
+		lft, rght, tp, bttm: integer;
+		r: Rect;
+
+		BoxX, BoxY, HOff, VOff: integer;
+		BSize: integer;
+		
+		LowS: StringHighState;
+
+	procedure DrawArc (p1, p2: p2GoPoint);
+		var
+			X,Y: integer;
+		begin
+			with p1^ do
+				begin
+					X := BoxX * (XCoord - 1) + HOff + BoxX div 2;
+					Y := BoxY * (BSize - YCoord) + VOff + BoxY div 2;
+					MoveTo (X, Y);
+				end;
+			with p2^ do
+				begin
+					X := BoxX * (XCoord - 1) + HOff + BoxX div 2;
+					Y := BoxY * (BSize - YCoord) + VOff + BoxY div 2;
+					LineTo (X, Y);
+				end;
+		end; {DrawArc}
+		
+	procedure DrawBArcs (b2: p2Node);
+		var
+			p2Cen, TargCen: p2GoPoint;
+		begin
+			p2Cen 	:= p2GoPoint (b2^.TheCenter);
+			TargCen 	:= p2GoPoint (TargetBlock^.TheCenter);
+			if ord4(p2Cen) <= ord4(TargCen) then {don't draw twice!}
+				DrawArc (p2Cen, TargCen);
+		end; {DrawBArcs}		
+	
+	procedure CalcBlockCenters (b: p2Node);
+		begin
+			Sum_XCoords := 0;
+			Sum_YCoords := 0;
+			Count_elements := 0;
+			EachElement (b, CallCalcCenter);
+			b^.TheCenter := b^.Child^.Child;
+			if Count_elements > 1 then
+				begin
+					Sum_XCoords := (Sum_XCoords * SCALE) div Count_elements;
+					Sum_YCoords := (Sum_YCoords * SCALE) div Count_elements;
+					{ Calculate Center accurate to 1/SCALE units }
+					with p2GoPoint(b^.TheCenter)^ do
+						MinDist := 
+							abs((XCoord * SCALE) - Sum_XCoords) +
+							abs((YCoord * SCALE) - Sum_YCoords);
+					TargetString := b;
+					EachElement (b, CallFindClosest);
+				end;
+		end; {CalcBlockCenters}
+
+	procedure DrawBlockArcs (b: p2Node);
+		var
+			p2Cen, TargCen: p2GoPoint;
+			X,Y: integer;
+		begin
+			TargetBlock := b;
+			EachAdjNode (b, DrawBArcs);
+		end; {DrawBlockArcs}		
+
+	procedure ColorBlockCenters (s: p2Node);
+		var nm: integer;
+		begin
+			with pDoc^, p2GoPoint(s^.TheCenter)^ do
+				begin
+					{ xxx Share this code with DrawBoard for portability?}
+					lft := dBoxH * (XCoord - 1) + dHorOffset;
+					rght := lft + dBoxH;
+					tp := dBoxV * (dBoardSize - YCoord) + dVerOffset;
+					bttm := tp + dBoxV;
+					SetRect (r, lft, tp, rght, bttm);
+					nm := -NumElements (s);
+					if VariableSizeRects then
+						if nm < -1 then
+							if nm > -10 then
+								InsetRect (r, nm+1, nm+1)
+							else
+								InsetRect (r, -12, -12);
+					InsetRect (r, INSET, INSET);
+					PenNormal;
+					PenPat (black);
+					if DoColorDrawing and HasColor then
+							RGBForeColor (GOColors[BStrSafeBlack]);
+					EraseOval (r);
+					LowS.StrStateInt := s^.LowState;
+					(* HighS.BlockStateInt := s^.HighState; *)
+					
+					case LowS.StrTyp of
+						BlackStonesStr:
+							if DoColorDrawing and HasColor then
+								begin
+									PenNormal;
+									RGBForeColor (GOColors[BStrSafeBlack]);
+									PaintOval (r);
+								end
+							else
+								begin
+									PenNormal;
+									PaintOval (r);
+								end;
+						WhiteStonesStr:
+							if DoColorDrawing and HasColor then
+								begin
+									PenNormal;
+									FrameOval (r);
+									InsetRect (r, 1, 1);
+									RGBForeColor (GOColors[BStrSafeBlack]);
+									FrameOval (r);
+								end
+							else
+								begin
+									PenNormal;
+									FrameOval (r);
+								end;
+									
+						CornerTerrStr,
+						EdgeTerrStr:
+							begin
+								PenPat (ltGray);
+								PaintRect (r);
+							end;
+							
+						CornDevTerrStr,
+						CornInfTerrStr:
+							begin
+								PenPat (gray);
+								PaintRect (r);
+							end;
+							
+						EdgeDevTerrStr,
+						CenterTerrStr:
+							begin
+								PenPat (dkGray);
+								PaintRect (r);
+							end;
+							
+						BlkLibStr:
+							begin
+								PenPat (dkGray);
+								PaintOval (r);
+							end;
+						JntLibStr:
+							begin
+								PenPat (gray);
+								PaintOval (r);
+							end;
+						WhtLibStr:
+							begin
+								PenPat (ltGray);
+								PaintOval (r);
+							end;
+							
+					end; {case LibS.LibType}
+
+				end; {cases}
+		end; {ColorBlockCenters}
+
+	begin {DrawBlocks}
+		with pDoc^ do
+			begin
+				BoxX := dBoxH;
+				BoxY := dBoxV;
+				HOff := dHorOffset;
+				VOff := dVerOffset;
+				BSize := dBoardSize;
+				if DoColorDrawing and HasColor then
+						SetUpColors;
+				EachGOGraphNode (g, CalcBlockCenters);
+				EachGOGraphNode (g, DrawBlockArcs);
+				EachGOGraphNode (g, ColorBlockCenters);
+			end; {with pDoc^}	
+		PenNormal;
+		PenPat (black);
+		if DoColorDrawing and HasColor then
+			RGBForeColor (GOColors[BStrSafeBlack]);
+	end; {DrawBlocks}
+	
+
+(* **** Groups drawing *** *)
+
+procedure CallCallCalcCenter (s: p2Node);
+	begin
+		EachElement (s, CallCalcCenter);
+	end; {CallCallCalcCenter}
+	
+procedure CallCallFindClosest (s: p2Node);
+	begin
+		EachElement (s, CallFindClosest);
+	end; {CallCallFindClosest}
+	
+procedure DrawGroups
+		(g: p2graph; 
+		pDoc: p2DocInfo; 
+		area: Rect; 
+		HasColor: Boolean);
+	
+	var
+		lft, rght, tp, bttm: integer;
+		r: Rect;
+
+		BoxX, BoxY, HOff, VOff: integer;
+		BSize: integer;
+		
+		LowS: BlockHighState;
+		(* HighS: GroupHighState; *)
+
+	procedure DrawArc (p1, p2: p2GoPoint);
+		var
+			X,Y: integer;
+		begin
+			with p1^ do
+				begin
+					X := BoxX * (XCoord - 1) + HOff + BoxX div 2;
+					Y := BoxY * (BSize - YCoord) + VOff + BoxY div 2;
+					MoveTo (X, Y);
+				end;
+			with p2^ do
+				begin
+					X := BoxX * (XCoord - 1) + HOff + BoxX div 2;
+					Y := BoxY * (BSize - YCoord) + VOff + BoxY div 2;
+					LineTo (X, Y);
+				end;
+		end; {DrawArc}
+		
+	procedure DrawBArcs (b2: p2Node);
+		var
+			p2Cen, TargCen: p2GoPoint;
+		begin
+			p2Cen 	:= p2GoPoint (b2^.TheCenter);
+			TargCen 	:= p2GoPoint (TargetBlock^.TheCenter);
+			if ord4(p2Cen) <= ord4(TargCen) then {don't draw twice!}
+				DrawArc (p2Cen, TargCen);
+		end; {DrawBArcs}		
+	
+	procedure CalcGroupCenters (b: p2Node);
+		begin
+			Sum_XCoords := 0;
+			Sum_YCoords := 0;
+			Count_elements := 0;
+			EachElement (b, CallCallCalcCenter);
+			b^.TheCenter := b^.Child^.Child^.Child;
+			if Count_elements > 1 then
+				begin
+					Sum_XCoords := (Sum_XCoords * SCALE) div Count_elements;
+					Sum_YCoords := (Sum_YCoords * SCALE) div Count_elements;
+					{ Calculate Center accurate to 1/SCALE units }
+					with p2GoPoint(b^.TheCenter)^ do
+						MinDist := 
+							abs((XCoord * SCALE) - Sum_XCoords) +
+							abs((YCoord * SCALE) - Sum_YCoords);
+					TargetString := b;
+					EachElement (b, CallCallFindClosest);
+				end;
+		end; {CalcGroupCenters}
+
+	procedure DrawGroupArcs (b: p2Node);
+		var
+			p2Cen, TargCen: p2GoPoint;
+			X,Y: integer;
+		begin
+			TargetBlock := b;
+			{Draw node at TheCenter}
+			EachAdjNode (b, DrawBArcs);
+		end; {DrawGroupArcs}		
+
+	procedure ColorGroupCenters (s: p2Node);
+		var nm: integer;
+		begin
+			with pDoc^, p2GoPoint(s^.TheCenter)^ do
+				begin
+					{ xxx Share this code with DrawBoard for portability?}
+					lft := dBoxH * (XCoord - 1) + dHorOffset;
+					rght := lft + dBoxH;
+					tp := dBoxV * (dBoardSize - YCoord) + dVerOffset;
+					bttm := tp + dBoxV;
+					SetRect (r, lft, tp, rght, bttm);
+					InsetRect (r, INSET, INSET);
+					nm := -NumElements (s);
+					if VariableSizeRects then
+						if nm < -1 then
+							if nm > -10 then
+								InsetRect (r, nm+1, nm+1)
+							else
+								InsetRect (r, -12, -12);
+					PenNormal;
+					PenPat (black);
+					if DoColorDrawing and HasColor then
+							RGBForeColor (GOColors[BStrSafeBlack]);
+					EraseOval (r);
+					LowS.BlockStateInt := s^.LowState;
+					(* HighS.GroupStateInt := s^.HighState; *)
+					
+					case LowS.BlockTyp of
+						BlackGroup:
+							if DoColorDrawing and HasColor then
+								begin
+									PenNormal;
+									RGBForeColor (GOColors[BStrSafeBlack]);
+									PaintOval (r);
+								end
+							else
+								begin
+									PenNormal;
+									PaintOval (r);
+								end;
+						WhiteGroup:
+							if DoColorDrawing and HasColor then
+								begin
+									PenNormal;
+									FrameOval (r);
+									InsetRect (r, 1, 1);
+									RGBForeColor (GOColors[BStrSafeBlack]);
+									FrameOval (r);
+								end
+							else
+								begin
+									PenNormal;
+									FrameOval (r);
+								end;
+									
+						CornerTerrBlock:
+							begin
+								PenPat (ltGray);
+								PaintRect (r);
+							end;
+							
+						EdgeTerrBlock:
+							begin
+								PenPat (Gray);
+								PaintRect (r);
+							end;
+							
+						CornerDevBlock:
+							begin
+								PenPat (dkGray);
+								PaintRect (r);
+							end;
+						
+						MidTerrBlock:
+							begin
+								PenPat (ltGray);
+								PaintRect (r);
+							end;
+
+
+							
+						UnknBlockType,
+						DisputedGroup:
+							begin
+								PenPat (gray);
+								PaintOval (r);
+							end;
+					end; {case LibS.LibType}
+
+				end; {cases}
+		end; {ColorGroupCenters}
+
+	begin {DrawGroups}
+		with pDoc^ do
+			begin
+				BoxX := dBoxH;
+				BoxY := dBoxV;
+				HOff := dHorOffset;
+				VOff := dVerOffset;
+				BSize := dBoardSize;
+				if DoColorDrawing and HasColor then
+						SetUpColors;
+				EachGOGraphNode (g, CalcGroupCenters);
+				EachGOGraphNode (g, DrawGroupArcs);
+				EachGOGraphNode (g, ColorGroupCenters);
+			end; {with pDoc^}	
+		PenNormal;
+		PenPat (black);
+		if DoColorDrawing and HasColor then
+			RGBForeColor (GOColors[BStrSafeBlack]);
+	end; {DrawGroups}
+	
+	
+(* **** Areas drawing *** *)
+
+procedure CallCallCallCalcCenter (s: p2Node);
+	begin
+		EachElement (s, CallCallCalcCenter);
+	end; {CallCallCallCalcCenter}
+	
+procedure CallCallCallFindClosest (s: p2Node);
+	begin
+		EachElement (s, CallCallFindClosest);
+	end; {CallCallCallFindClosest}
+	
+procedure DrawAreas
+		(g: p2graph; 
+		pDoc: p2DocInfo; 
+		area: Rect; 
+		HasColor: Boolean);
+	
+	var
+		lft, rght, tp, bttm: integer;
+		r: Rect;
+
+		BoxX, BoxY, HOff, VOff: integer;
+		BSize: integer;
+		
+		LowS: GroupHighState;
+		(* HighS: AreaHighState; *)
+
+	procedure DrawArc (p1, p2: p2GoPoint);
+		var
+			X,Y: integer;
+		begin
+			with p1^ do
+				begin
+					X := BoxX * (XCoord - 1) + HOff + BoxX div 2;
+					Y := BoxY * (BSize - YCoord) + VOff + BoxY div 2;
+					MoveTo (X, Y);
+				end;
+			with p2^ do
+				begin
+					X := BoxX * (XCoord - 1) + HOff + BoxX div 2;
+					Y := BoxY * (BSize - YCoord) + VOff + BoxY div 2;
+					LineTo (X, Y);
+				end;
+		end; {DrawArc}
+		
+	procedure DrawBArcs (b2: p2Node);
+		var
+			p2Cen, TargCen: p2GoPoint;
+		begin
+			p2Cen 	:= p2GoPoint (b2^.TheCenter);
+			TargCen 	:= p2GoPoint (TargetBlock^.TheCenter);
+			if ord4(p2Cen) <= ord4(TargCen) then {don't draw twice!}
+				DrawArc (p2Cen, TargCen);
+		end; {DrawBArcs}		
+	
+	procedure CalcAreaCenters (b: p2Node);
+		begin
+			Sum_XCoords := 0;
+			Sum_YCoords := 0;
+			Count_elements := 0;
+			EachElement (b, CallCallCallCalcCenter);
+			b^.TheCenter := b^.Child^.Child^.Child^.Child;
+			if Count_elements > 1 then
+				begin
+					Sum_XCoords := (Sum_XCoords * SCALE) div Count_elements;
+					Sum_YCoords := (Sum_YCoords * SCALE) div Count_elements;
+					{ Calculate Center accurate to 1/SCALE units }
+					with p2GoPoint(b^.TheCenter)^ do
+						MinDist := 
+							abs((XCoord * SCALE) - Sum_XCoords) +
+							abs((YCoord * SCALE) - Sum_YCoords);
+					TargetString := b;
+					EachElement (b, CallCallCallFindClosest);
+				end;
+		end; {CalcAreaCenters}
+
+	procedure DrawAreaArcs (b: p2Node);
+		var
+			p2Cen, TargCen: p2GoPoint;
+			X,Y: integer;
+		begin
+			TargetBlock := b;
+			EachAdjNode (b, DrawBArcs);
+		end; {DrawAreaArcs}		
+
+	procedure ColorAreaCenters (s: p2Node);
+		var nm: integer;
+		begin
+			with pDoc^, p2GoPoint(s^.TheCenter)^ do
+				begin
+					{ xxx Share this code with DrawBoard for portability?}
+					lft := dBoxH * (XCoord - 1) + dHorOffset;
+					rght := lft + dBoxH;
+					tp := dBoxV * (dBoardSize - YCoord) + dVerOffset;
+					bttm := tp + dBoxV;
+					SetRect (r, lft, tp, rght, bttm);
+					InsetRect (r, INSET, INSET);
+					nm := -NumElements (s);
+					if VariableSizeRects then
+						if nm < -1 then
+							if nm > -10 then
+								InsetRect (r, nm+1, nm+1)
+							else
+								InsetRect (r, -12, -12);
+					PenNormal;
+					PenPat (black);
+					if DoColorDrawing and HasColor then
+							RGBForeColor (GOColors[BStrSafeBlack]);
+					EraseOval (r);
+					LowS.GroupStateInt := s^.LowState;
+					(* HighS.AreaStateInt := s^.HighState; *)
+					
+					case LowS.GroupTyp of
+						BlackArea:
+							if DoColorDrawing and HasColor then
+								begin
+									PenNormal;
+									RGBForeColor (GOColors[BStrSafeBlack]);
+									PaintOval (r);
+								end
+							else
+								begin
+									PenNormal;
+									PaintOval (r);
+								end;
+						WhiteArea:
+							if DoColorDrawing and HasColor then
+								begin
+									PenNormal;
+									FrameOval (r);
+									InsetRect (r, 1, 1);
+									RGBForeColor (GOColors[BStrSafeBlack]);
+									FrameOval (r);
+								end
+							else
+								begin
+									PenNormal;
+									FrameOval (r);
+								end;
+						OpenArea:
+							begin
+								PenPat (gray);
+								PaintRect (r);
+							end;
+							
+						UnknGroupType,
+						DisputedArea:
+							begin
+								PenPat (ltgray);
+								PaintOval (r);
+							end;
+						otherwise
+							begin
+								{$IFC qDebug}
+									GOEngineError ('Unknown Group Color ',LowS.GroupStateInt,1);
+								{$ENDC}
+							end;
+					end; {case LowS.GroupTyp}
+
+				end; {cases}
+		end; {ColorAreaCenters}
+
+	begin {DrawAreas}
+		with pDoc^ do
+			begin
+				BoxX := dBoxH;
+				BoxY := dBoxV;
+				HOff := dHorOffset;
+				VOff := dVerOffset;
+				BSize := dBoardSize;
+				if DoColorDrawing and HasColor then
+						SetUpColors;
+				EachGOGraphNode (g, CalcAreaCenters);
+				EachGOGraphNode (g, DrawAreaArcs);
+				EachGOGraphNode (g, ColorAreaCenters);
+			end; {with pDoc^}	
+		PenNormal;
+		PenPat (black);
+		if DoColorDrawing and HasColor then
+			RGBForeColor (GOColors[BStrSafeBlack]);
+	end; {DrawAreas}
+{$IFC qTrace}{$D++}{$ENDC}

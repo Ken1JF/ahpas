@@ -1,0 +1,899 @@
+{ AbstHier2.p		Abstraction Hierarchies
+
+DESCRIPTION
+	Implementation of AbstHier.p 
+
+AUTHOR
+	Ken Friedenbach
+	Copyright 1980-1988
+
+BUGS
+	Performance: DelNodList is O(N), where N is the number of nodes:
+		need to be able to locate a node quicker.
+}
+
+{ Change history: }
+{ 20-Mar-88 Began work on new updating algorithms (AddAdj, DelAdj, etc.) }
+{  8-Aug-86 Begin translating from C code (dissertation project). }
+
+{ xx marks issues to review. }
+
+{$S ARes}
+procedure AbstHierError (s: Str255);
+	begin
+		KoncatCst (@s, ', in AbstHier Unit.');
+		GOEngineError (s, 0, 0);
+	end; {AbstHierError}
+
+procedure writeNod (pDoc: p2DocInfo; g: p2Graph; nod: p2Node);
+	var m: integer; RowLetter: String[19]; nd: p2GOPoint;
+	begin
+		case g^.GraphLevel of
+			PointsGraphLevel:
+				begin
+					nd := p2GOPoint(nod);
+					m := nd^.MoveIndex;
+					if m > pDoc^.dNumHandicap then
+						write ('Move ', (m-pDoc^.dNumHandicap):1)
+					else
+						with nd^ do
+							begin
+								write ('Point ');
+								WritePoint (XCoord, YCoord); 
+							end;
+				end;
+			StringsGraphLevel:
+				begin
+					write('Str@ ');
+					writeNod (pDoc, g^.lowGraph, nod^.Child);
+				end;
+			BlocksGraphLevel:
+				begin
+					write('Blk@ ');
+					writeNod (pDoc, g^.lowGraph, nod^.Child);
+				end;
+			GroupsGraphLevel:
+				begin
+					write('Gr@ ');
+					writeNod (pDoc, g^.lowGraph, nod^.Child);
+				end;
+			AreasGraphLevel:
+				begin
+					write('Ar@ ');
+					writeNod (pDoc, g^.lowGraph, nod^.Child);
+				end;
+		end; {cases}
+	end; {writeNod}
+
+
+{$IFC qTrace}{$D+}{$ENDC}
+	{ Partition Operations }
+
+{$S ARes}
+function PartSize (nod: p2Node): integer;
+{ xx replace with count? }
+	var done: Boolean; ch: p2Node; n: integer;
+	begin
+		n := 0;
+		if nod <> nil then
+			begin
+				ch := nod^.Child;
+				while ch <> nil do
+					begin
+						n := n+1;
+						ch := ch^.Sibling;
+					end;
+			end;
+		PartSize := n;
+	end; {PartSize}
+
+{$S ARes}
+function BiggerPart (Nod1, Nod2: p2Node): Boolean;
+{ returns true if size of Child list of Nod1 > size of Child list of Nod2 }
+	var done: Boolean; Ch1, Ch2: p2Node;
+	begin
+		BiggerPart := false;
+		{ check for nil pointers }
+		if Nod1 = nil then
+			{ done }
+		else if Nod2 = nil then
+			BiggerPart := true
+		else
+			begin
+				Ch1 := Nod1^.Child;
+				Ch2 := Nod2^.Child;
+				done := false;
+				repeat
+					 { check for empty children lists }
+					if Ch1 = nil then
+						done := true
+					else if Ch2 = nil then
+						begin
+							BiggerPart := true;
+							done := true;
+						end
+					else
+						begin
+							 Ch1 := Ch1^.Sibling;
+							 Ch2 := Ch2^.Sibling;
+						end;
+				until done;
+			end;
+	end; {BiggerPart}
+	
+	{ Some utilities to update abstraction graphs }
+var 
+		{ Global variables, used as temporaries, code does not need to be reentrant. }
+		{ These three variables are used by AddNodeHigh, which is recursive...}
+		{ However, values are not used after recursive call, so it works. }
+	LookingFor: integer;
+	SamePoint: p2GOPoint;
+	SameNode: p2Node;
+	
+{$S ARes}
+procedure FindSamePtType (pDoc: p2DocInfo; p: p2GOPoint);
+	begin
+		if p^.PtStrType.PtStateInt = LookingFor then
+			SamePoint := p;
+	end; {FindSamePtType}
+
+{$S ARes}
+procedure FindSameGraphType (n: p2Node);
+	begin
+		if n^.HighState = LookingFor then
+			SameNode := n;
+	end; {FindSameGraphType}
+
+	{ Operators to adjust "high" graph }
+	
+{$S ARes}
+function AddNodeHigh (pDoc: p2DocInfo; g: p2Graph; nod: TAbstHierNode): Boolean;
+	{ add the image of a node to the HighGraph. }
+	{ Returns true if a new node was created, }
+	{ i.e. needs to be "re-computed" after arcs added. }
+	var SameAbstNode: TAbstHierNode; HighNode: p2Node;
+		isNew: Boolean;
+	begin
+		if gTraceUpdate then
+			begin
+				write('AddNodeHigh:');
+				writeLev(g^.GraphLevel);
+				write(' nod: ', ord4(nod.PtRec):1, ' ');
+				if g^.GraphLevel = PointsGraphLevel then
+					writeNod(pDoc, g, nod.GphRec);
+					(* else, path not valid yet! *)
+				writeln;
+			end;
+		AddNodeHigh := false; { default }
+		if g^.GraphLevel = PointsGraphLevel then
+			begin
+				SamePoint := nil;
+				LookingFor := nod.PtRec^.PtStrType.PtStateInt;
+				{ assumes PtStrType has already been set }
+				EachAdjPoint (pDoc, nod.PtRec, FindSamePtType);
+				if SamePoint = nil then
+					if PointsGraphLevel >= pDoc^.dUpdateLevel then 
+						HighNode := AddNode (g^.HighGraph, LookingFor)
+					else 
+						begin
+							HighNode := AddNodeLow (pDoc, g^.HighGraph, LookingFor, isNew);
+							AddNodeHigh := isNew;
+						end
+				else
+					HighNode := p2Node (SamePoint^.PtNode);
+			end
+		else
+			begin
+				SameNode := nil;
+				LookingFor := nod.GphRec^.HighState;
+				{ assumes HighState has already been set }
+				EachAdjNode (nod.GphRec, FindSameGraphType);
+				if SameNode = nil then
+					if g^.GraphLevel >= pDoc^.dUpdateLevel then
+						begin
+							HighNode := AddNode (g^.HighGraph, LookingFor);
+							AddNodeHigh := true;
+						end
+					else
+						begin
+							HighNode := AddNodeLow (pDoc, g^.HighGraph, LookingFor, isNew);
+							AddNodeHigh := isNew;
+						end
+				else
+					HighNode := SameNode^.Parent;
+			end;
+		AddElement (HighNode, nod.GphRec);
+		if gTraceUpdate then
+			begin
+				AbstIndent := AbstIndent - 3;
+				write (' ':AbstIndent);
+				write('End AddNodeHigh:');
+				writeLev(g^.GraphLevel);
+				write(' nod, HighNode: ', ord4(nod.PtRec):1,
+							' ', ord4(HighNode):1, ' ');
+				(* path not valid yet! writeNod (pDoc, g^.HighGraph, HighNode); *)
+				writeln;
+			end;
+	end; {AddNodeHigh}
+
+{$S ARes}
+procedure DelNodHigh (pDoc: p2DocInfo; g: p2Graph; nod: TAbstHierNode);
+	var HighNode: p2Node;
+	begin
+		HighNode := nod.GphRec^.Parent;
+		DeleteElement (HighNode, p2Node (nod));
+		if HighNode^.Child = nil then
+			begin
+				if g^.GraphLevel >= pDoc^.dUpdateLevel then
+					DelNod (g^.HighGraph, HighNode)
+				else
+					DelNodLow (pDoc, g^.HighGraph, TAbstHierNode (HighNode));
+			end;
+	end; {DelNodHigh}
+
+{$S ARes}
+procedure AddArcHigh (pDoc: p2DocInfo; g: p2Graph; chgNod, adjNod: p2Node); 
+	var highChg, highAdj: p2Node; highA: p2Arc;
+	begin
+		highChg := chgNod^.Parent;
+		highAdj := adjNod^.Parent;
+		if highChg <> highAdj then
+			begin
+				highA := FindEdge (highChg, highAdj);
+				if highA = nil then
+					if g^.GraphLevel >= pDoc^.dUpdateLevel then
+						highA := AddEdge (g^.HighGraph, highChg, highAdj)
+					else
+						highA := AddArcLow (pDoc, g^.HighGraph, highChg, highAdj)
+				else
+					with highA^ do
+						ImageCount := ImageCount + 1;
+			end;
+	end; {AddArcHigh}
+
+{$S ARes}
+procedure DelArcHigh (pDoc: p2DocInfo; g: p2Graph; chgNode, adjNode: p2Node);
+	var highChg, highAdj: p2Node; highA: p2Arc;
+	begin
+		highChg := chgNode^.Parent;
+		highAdj := adjNode^.Parent;
+		if highChg <> highAdj then
+			begin
+				highA := FindEdge (highChg, highAdj);
+				if highA = nil then
+					AbstHierError ('DelArcHigh: no image')
+				else
+					with highA^ do
+						begin
+							ImageCount := ImageCount - 1;
+							if ImageCount <= 0 then
+								if g^.GraphLevel >= pDoc^.dUpdateLevel then
+									DelEdge (g^.HighGraph, highChg, highAdj)
+								else
+									DelArcLow (pDoc, g^.HighGraph, highChg, highAdj)
+						end;
+			end;
+	end; {DelArcHigh}
+
+	{ Operators to change "low" graph }
+
+{$S ARes}
+procedure MergeNodes (pDoc: p2DocInfo; g: p2Graph; nod: p2Node; HighNod: p2Node);
+	var mergeStack: p2ListItem;
+
+	function InTargetPart (n: p2Node; var Continue: Boolean): Boolean;
+		begin
+			if gTraceUpdate then
+				begin
+					write('InTargetPart (MergeNodes):');
+					writeLev(g^.GraphLevel);
+					writeln(' n, Parent, HighNod: ');
+					write ('   ', ord4(n):1, ' '); writeNod(pDoc, g, n);
+					write ('   ', ord4(n^.Parent):1); 
+							writeNod(pDoc, g^.HighGraph, n^.Parent);
+					writeln;
+					write ('   ', ord4(HighNod):1);
+							writeNod(pDoc, g^.HighGraph, HighNod);
+					writeln;
+				end;
+			InTargetPart := n^.Parent = HighNod;
+		end; {InTargetPart}
+		
+	var saveState: integer; p, nextP: p2ListItem;
+	
+	begin
+		if gTraceUpdate then
+			begin
+				write('MergeNodes:');
+				writeLev(g^.GraphLevel);
+				writeln(' nod, HighNod: ', ord4(nod):1,' ', ord4(HighNod):1);
+			end;
+			{ do BFS to establish order in stack }
+		BreadFirstSearch (pDoc, g, nod, InTargetPart, mergeStack);
+		saveState := nod^.HighState;
+			{ set the nodes to be merged to UndefinedState }
+		p := mergeStack;
+		while p <> nil do
+			begin
+				p^.ListItem^.HighState := UndefinedState;
+				p := p^.NextListItem;
+			end;
+			{ use ChangeState (without Merge/Split) to change back }
+		p := mergeStack;
+		while p <> nil do
+			begin
+				nextP := p^.NextListItem;
+				{$IFC TraceRequest} 
+				write ('#1 ');
+				{$ENDC}
+				ChangeState (pDoc, g, TAbstHierNode(p^.ListItem), saveState, false);
+				p := nextP;
+			end;
+		ReturnToAvailList (g, mergeStack);
+		if gTraceUpdate then
+			begin
+				writeln('End MergeNodes:');
+			end;
+	end; {MergeNodes}
+
+{$S ARes}
+procedure CheckMerge (pDoc: p2DocInfo; g: p2Graph; nod1, nod2: p2Node);
+	var high1, high2: p2Node;
+	begin
+		if gTraceUpdate then
+			begin
+				write('CheckMerge:');
+				writeLev(g^.GraphLevel);
+				writeln(' nod1, nod2: ', ord4(nod1):1,' ', ord4(nod2):1);
+			end;
+		high1 := nod1^.Parent;
+		high2 := nod2^.Parent;
+		if (high1 <> high2) and (nod1^.HighState = nod2^.HighState) then
+			if BiggerPart (high1, high2) then
+				MergeNodes (pDoc, g, nod2, high2)
+			else
+				MergeNodes (pDoc, g, nod1, high1)
+	end; {CheckMerge}
+	
+{$S ARes}
+function AddNodeLow (pDoc: p2DocInfo; g: p2Graph; loState: integer; var NewNode: Boolean): p2Node;
+	var n: p2Node;
+	begin
+		if gTraceUpdate then
+			begin
+				write('AddNodeLow:');
+				writeLev(g^.GraphLevel);
+				writeln(' loState: ', loState:1);
+			end;
+		n := AddNode (g, loState);
+		n^.HighState := CallComputeNew (pDoc, g, n, g^.ComputeNew);
+		NewNode := AddNodeHigh (pDoc, g, TAbstHierNode (n));
+		AddNodeLow := n;
+	end; {AddNodeLow}
+
+{$S ARes}
+procedure DelNodLow (pDoc: p2DocInfo; g: p2Graph; nod: TAbstHierNode);
+	begin
+		if gTraceUpdate then
+			begin
+				write('DelNodLow:');
+				writeLev(g^.GraphLevel);
+				writeln(' nod: ', ord4(nod.GphRec):1);
+			end;
+		with nod.GphRec^ do
+			if (InList <> nil) or (OutList <> nil) then
+				AbstHierError ('Node not isolated.');
+		DelNodHigh (pDoc, g, nod);
+		DelNod (g, nod.GphRec);
+	end; {DelNodLow}
+
+{$S ARes}
+function AddArcLow (pDoc: p2DocInfo; g: p2Graph; chgNode, adjNode: p2Node): p2Arc;
+	var a: p2Arc;
+	begin
+		if gTraceUpdate then
+			begin
+				write ('AddArcLow:');
+				writeLev (g^.GraphLevel);
+				write (' chgNode, adjNode: ', ord4(chgNode):1, ' ');
+				writeNod (pDoc, g, chgNode);
+				write (', ',  ord4(adjNode):1, ' ');
+				writeNod (pDoc, g, adjNode);
+				writeln;
+			end;
+		a := AddEdge (g, chgNode, adjNode);
+		AddArcHigh (pDoc, g, chgNode, adjNode); 
+		CheckMerge (pDoc, g, chgNode, adjNode);
+		AddArcLow := a;
+	end; {AddArcLow}
+
+{$S ARes}
+function CheckSplit (pDoc: p2DocInfo; g: p2Graph; nod1, nod2: p2Node): p2Node;
+{ checks whether removal of arc from nod1 to nod2 will cause a split. }
+{ if so, performs the split. }
+{ returns the original component (in case of multiple splits). }
+	var splitStack: p2ListItem; high1: p2Node;
+
+	function PathInPart (low1, low2: p2Node): Boolean;
+		{ looks for a path from low2 to low1 contained in high1 }
+		{ returns true if found, false if not found }
+		{ sets up splitStack to have the proper order }
+		var found: Boolean;
+		
+		function InTargetPart (n: p2Node; var Continue: Boolean): Boolean;
+			begin
+				if n = low1 then
+					begin
+						found := true;
+						Continue := false;
+						InTargetPart := false; {don't push the target}
+					end
+				else
+					InTargetPart := n^.Parent = high1;
+			end; {InTargetPart}
+		
+		begin {PathInPart}
+			if gTraceUpdate then
+				begin
+					write ('PathInPart:');
+					writeLev (g^.GraphLevel);
+					write (' low1,low2: ', ord4(low1):1, ' ');
+					writeNod (pDoc, g, low1);
+					write (', ',  ord4(low2):1, ' ');
+					writeNod (pDoc, g, low2);
+					writeln;
+				end;
+			found := false;
+			BreadFirstSearch (pDoc, g, low2, InTargetPart, splitStack);
+			PathInPart := found;
+		end; {PathInPart}
+	
+	procedure SplitNodes (low: p2Node);
+	
+		var saveState, newHi: integer; p: p2ListItem; g2: p2Graph; par: p2Node;
+		begin
+			saveState := low^.HighState;
+			if gTraceUpdate then
+				begin
+					write ('SplitNodes:');
+					writeLev (g^.GraphLevel);
+					write (' low: ', ord4(low):1, ' old state ', saveState:1, ' ');
+					writeNod (pDoc, g, low);
+					writeln;
+				end;
+			{ use ChangeState (without Merge/Split): change to UndefinedState }
+			p := splitStack;
+			while p <> nil do
+				begin
+					{$IFC TraceRequest} 
+					write ('#2 ');
+					{$ENDC}
+					ChangeState (pDoc, g, TAbstHierNode(p^.ListItem), UndefinedState, false);
+					p := p^.NextListItem;
+				end;
+			{ set the split nodes back to saveState: }
+			p := splitStack;
+			while p <> nil do
+				begin
+					p^.ListItem^.HighState := saveState;
+					p := p^.NextListItem;
+				end;
+				
+			{ Need to do: make sure coloring functions satisfy the following:
+				1.  Each level has an "Undefined" state (say 0).
+				2.  Each coloring function maps "Undefined" to "Undefined". 
+				3.  Coloring function is prepared to "see" Undefined in the Neighborhood.
+				4.  Rest of program DOES NOT expect (or use!) the "Undefined" state. }
+
+			{ Then the above will work. }
+
+			{ also: set the high node (was not in C version!) }
+			par := splitStack^.ListItem^.Parent;
+
+			ReturnToAvailList (g, splitStack);
+
+			g2 := g;
+			while g2^.GraphLevel < pDoc^.dUpdateLevel do
+				begin
+					g2 := g2^.HighGraph;
+					par^.LowState := saveState;
+					newHi := CallComputeHigh (pDoc, g2 {not g!}, par, g2^.ComputeHigh);
+					{$IFC TraceRequest} 
+					write ('#3 ');
+					{$ENDC}
+					ChangeState (pDoc, g2, TAbstHierNode(par), newHi, true);
+					(* **** Or?? use <= above, and this:
+					if g2^.GraphLevel >= dUpdateLevel then
+						par^.LowState := newHi
+					else
+						ChangeState (pDoc, g2, TAbstHierNode(par), newHi, true);
+					**** *)
+					{ xx does this work correctly? i.e. are adjacencies in place? }
+					{ !!! not good enough: par^.HighState := newHi;!!! }
+					par := par^.Parent;
+					saveState := newHi;
+				end;
+
+			{ not good enough! may need to merge higher nodes: }
+			par^.LowState := saveState;
+			
+		end; {SplitNodes}
+		
+	begin {CheckSplit}
+		CheckSplit := nod1; {default}
+		high1 := nod1^.Parent;
+		if gTraceUpdate then
+			begin
+				write (' ':AbstIndent);
+				AbstIndent := AbstIndent + 4;
+				write ('Entering CheckSplit:');
+				writeLev (g^.GraphLevel);
+				write (' nod1: ');
+				writeNod (pDoc, g, nod1);
+				write (', nod2: ');
+				writeNod (pDoc, g, nod2);
+				writeln;
+				write (' ':AbstIndent);
+				write (' high1: ', ord4(high1):1, ' ');
+				writeNod (pDoc, g^.HighGraph, high1);
+				write (', nod2^.Parent: ',  ord4(nod2^.Parent):1, ' ');
+				writeNod (pDoc, g^.HighGraph, nod2^.Parent);
+				writeln;
+			end;
+		if high1 = nod2^.Parent then
+			begin
+				if not pathInPart (nod1, nod2) then
+					if PartSize (high1) > 2*StackSize(splitStack) then
+						SplitNodes (nod2)
+					else
+						begin
+							ReturnToAvailList (g, splitStack);
+							if pathInPart (nod2, nod1) then ; {recompute splitStack}
+							SplitNodes (nod1);
+							CheckSplit := nod2;
+						end;
+				ReturnToAvailList (g, splitStack);
+			end;
+		if gTraceUpdate then
+			begin
+				write (' ':AbstIndent);
+				AbstIndent := AbstIndent + 4;
+				write ('Leaving CheckSplit:');
+				writeLev (g^.GraphLevel);
+				write (' nod1: ');
+				writeNod (pDoc, g, nod1);
+				write (', nod2: ');
+				writeNod (pDoc, g, nod2);
+				writeln;
+				write (' ':AbstIndent);
+				write (' high1: ');
+				writeNod (pDoc, g^.HighGraph, high1);
+				write (', nod2^.Parent: ');
+				writeNod (pDoc, g^.HighGraph, nod2^.Parent);
+				writeln;
+			end;
+	end; {CheckSplit}
+
+{$S ARes}
+procedure DelArcLow (pDoc: p2DocInfo; g: p2Graph; chgNode, adjNode: p2Node);
+	var ignore: p2Node;
+	begin
+		if gTraceUpdate then
+			begin
+				write (' ':AbstIndent);
+				write('DelArcLow:');
+				writeLev(g^.GraphLevel);
+				write(' chgNode: ');
+				writeNod (pDoc, g, chgNode);
+				write (' adjNode: ');
+				writeNod (pDoc, g, adjNode);
+				writeln;
+			end;
+		DelArcHigh (pDoc, g, chgNode, adjNode);
+		DelEdge (g, chgNode, adjNode);
+		ignore := CheckSplit (pDoc, g, chgNode, adjNode);
+	end; {DelArcLow}
+
+var
+	str61, blk61: p2Node; 
+	str71, blk71: p2Node;
+	str81, blk81: p2Node;
+	str91, blk91: p2Node;
+
+	str61state, blk61state: integer; 
+	str71state, blk71state: integer;
+	str81state, blk81state: integer;
+	str91state, blk91state: integer;
+
+{$IFC qTrace}{$D++}{$ENDC}
+{$S ARes}
+procedure ChangeState (pDoc: p2DocInfo; g: p2Graph; chgNode: TAbstHierNode; 
+		newS: integer; doMergeSplit: Boolean);
+		
+{$IFC qTrace}{$D+}{$ENDC}
+	procedure DelPtArcForCS (pDoc: p2DocInfo; Nod2: p2GOPoint);
+		begin
+			DelArcHigh (pDoc, g, chgNode.GphRec, p2Node (Nod2));
+		end; {DelPtArcForCS}
+
+	procedure AddPtArcForCS (pDoc: p2DocInfo; Nod2: p2GOPoint);
+		begin
+			AddArcHigh (pDoc, g, chgNode.GphRec, p2Node (nod2));
+		end; {AddPtArcForCS}
+	
+	procedure DelArcForCS (a: p2Arc);
+		begin
+			with a^ do
+				if FromNode = chgNode.GphRec then
+					DelArcHigh (pDoc, g, FromNode, ToNode)
+				else
+					DelArcHigh (pDoc, g, ToNode, FromNode);
+		end; {DelArcForCS}
+
+	procedure AddArcForCS (a: p2Arc);
+		begin
+			with a^ do
+				if FromNode = chgNode.GphRec then
+					AddArcHigh (pDoc, g, FromNode, ToNode)
+				else
+					AddArcHigh (pDoc, g, ToNode, FromNode);
+		end; {AddArcForCS}
+
+	var   { global variables, code using then not reentrant }
+		changeStack: p2ListItem;
+		saveState: integer; cs_split: p2Node;
+
+	procedure pushPoint (pDoc: p2DocInfo; p2: p2GOPoint);
+		begin
+			Push (g, changeStack, p2Node(p2));
+		end; {pushPoint}
+		
+	procedure pushNode (p2: p2Node);
+		begin
+			Push (g, changeStack, p2);
+		end; {pushPoint}
+	
+	
+	procedure chk_cs (g: p2Graph; p: p2Node);
+		begin
+			if p^.HighState = saveState then
+				if cs_split = nil then
+					cs_split := p
+				else
+					cs_split := CheckSplit (pDoc, g, cs_split, p)
+			else
+				CheckMerge (pDoc, g, p, p2Node (chgNode));
+		end; {chk_cs}
+
+{$IFC qTrace}{$D+}{$ENDC}
+	var   
+		chkState: integer;
+		needCheck: Boolean;
+		
+		LibsChanged: Boolean;
+		
+	procedure writeLib(p1: p2GOPoint; var str, blk: p2Node; var strstate, blkstate: integer);
+		begin
+		(*
+			with p1^ do
+				WritePoint (XCoord, YCoord);
+			write (' ');
+		*)
+			write ((ord4(p1^.PtNode) mod 100000):1);
+				str := p1^.PtNode;
+				strstate := p1^.PtNode^.HighState;
+			write (' '); write (p1^.PtStrType.PtStateInt:1, ' ');
+			write ((ord4(p1^.PtNode^.Parent) mod 100000):1);
+				blk := p1^.PtNode^.Parent;
+				blkstate := p1^.PtNode^.Parent^.HighState;
+			write (' ', p1^.PtNode^.Parent^.HighState:1, ', ');
+		end; {writeLib}
+		
+	procedure ChkLibs (p1: p2GOPoint; str, blk: p2Node; strstate, blkstate: integer);
+		begin
+			with p1^ do
+				begin
+					if PtNode <> str then
+						LibsChanged := true;
+					if PtNode^.Parent <> blk then
+						LibsChanged := true;
+					if PtNode^.HighState <> strstate then
+						LibsChanged := true;
+					if PtNode^.Parent^.HighState <> blkstate then
+						LibsChanged := true;
+				end;
+		end; {ChkLibs}
+		
+	begin {ChangeState}
+		if gTraceRequest then
+			begin
+				write (' ':AbstIndent);
+				AbstIndent := AbstIndent + 3;
+				write('Entering ChangeState:');
+				writeLev(g^.GraphLevel);
+				write(' chgNode: ');
+				writeNod (pDoc, g, chgNode.GphRec);
+				writeln (' newS: ', newS:1,' doMergeSplit: ', doMergeSplit);
+			end;
+		if g^.GraphLevel = PointsGraphLevel then
+			begin
+				if doMergeSplit then
+					saveState := chgNode.PtRec^.PtStrType.PtStateInt;
+				EachAdjPoint (pDoc, chgNode.PtRec, DelPtArcForCS);
+				DelNodHigh (pDoc, g, chgNode);
+				chgNode.PtRec^.PtStrType.PtStateInt := newS;
+				needCheck := AddNodeHigh (pDoc, g, chgNode);
+				EachAdjPoint (pDoc, chgNode.PtRec, AddPtArcForCS);
+				if doMergeSplit then
+					begin
+						changeStack := nil;
+						EachAdjPoint (pDoc, chgNode.PtRec, pushPoint);
+						cs_split := nil;
+						PopEach (g, changeStack, chk_cs);
+					end;
+			end
+		else
+			begin
+				if doMergeSplit then
+					saveState := chgNode.GphRec^.HighState; 
+				EachIncidentArc (chgNode.GphRec, DelArcForCS);
+				DelNodHigh (pDoc, g, chgNode);
+				chgNode.GphRec^.HighState := newS;
+				needCheck := AddNodeHigh (pDoc, g, chgNode);
+				EachIncidentArc (chgNode.GphRec, AddArcForCS);
+				if doMergeSplit then
+					begin
+						changeStack := nil;
+						EachAdjNode (chgNode.GphRec, pushNode);
+						cs_split := nil;
+						PopEach (g, changeStack, chk_cs);
+					end;
+			end;
+		if gTraceUpdate then
+			begin
+				AbstIndent := AbstIndent - 3;
+				write (' ':AbstIndent);
+				write('Leaving ChangeState:');
+				writeLev(g^.GraphLevel);
+				write(' ');
+				writeNod (pDoc, g, chgNode.GphRec);
+				writeln (' newS: ', newS:1,' doMergeSplit: ', doMergeSplit);
+			end;
+	end; {ChangeState}
+
+{$S ARes}
+procedure CheckChanges (pDoc: p2DocInfo; upGraph: p2Graph);
+	var
+		chgNode: p2Node;
+		chgPt: p2GOPoint;
+		didit: Boolean;
+		newState: integer;
+	begin
+		if gTraceRequest then
+			writeln ('CheckChanges: ');
+		with pDoc^ do
+			while upGraph^.GraphLevel <= dUpdateLevel do
+				begin
+					if gTraceRequest then
+						begin
+							write ('  Updating: ');
+							WriteLev (upGraph^.GraphLevel);
+							writeln;
+						end;
+					while upGraph^.ChangeList <> nil do
+						begin
+							chgPt := p2GOPoint(Pop(upGraph, upGraph^.ChangeList));
+							
+							{ Find the object represented by point on the board: }
+							case upGraph^.GraphLevel of
+								PointsGraphLevel:
+									chgNode := p2Node(chgPt);
+								StringsGraphLevel:
+									chgNode := p2Node(chgPt)^.Parent;
+								BlocksGraphLevel:
+									chgNode := p2Node(chgPt)^.Parent^.Parent;
+								GroupsGraphLevel:
+									chgNode := p2Node(chgPt)^.Parent^.Parent^.Parent;
+								AreasGraphLevel:
+									chgNode := p2Node(chgPt)^.Parent^.Parent^.Parent^.Parent;
+							end; {cases GraphLevel}
+							
+							with chgPt^ do
+								begin
+									RequestCheck [upGraph^.GraphLevel] := false;
+								end;
+
+							if gTraceRequest then
+								begin
+									write ('   Change: ');
+									WriteLev (upGraph^.GraphLevel);
+								end;
+
+							newState :=  CallComputeHigh 
+								(pDoc, upGraph, chgNode, upGraph^.ComputeHigh);
+								
+							if newState <> chgNode^.HighState then
+								begin
+									if gTraceRequest then
+										begin
+											write (' at ');
+											with chgPt^ do
+												WritePoint (XCoord, YCoord);
+											writeln (' done; old = ', chgNode^.HighState:1,
+													' new = ', newState:1)
+										end;
+									{$IFC TraceRequest} 
+									write ('#4 ');
+									{$ENDC}
+									ChangeState (pDoc, upGraph, TAbstHierNode(chgNode), newState, true);
+									if upGraph^.GraphLevel < dUpdateLevel then
+										RequestChange (upGraph^.HighGraph, chgPt);
+									(* omit for now? RequestChanges (pDoc, upGraph, chgPt, chgNode); *)
+								end
+							else
+								if gTraceRequest then
+								begin
+									write (' ');
+									with chgPt^ do
+										WritePoint (XCoord, YCoord);
+									writeln (' NOT done; states = ', newState);
+								end;
+								
+								
+						end;
+					upGraph := upGraph^.HighGraph;
+				end;
+	end; {CheckChanges}
+
+{$S ARes}
+procedure RequestChanges (pDoc: p2DocInfo; g: p2Graph; pt: p2GOPoint; Str1: p2Node);
+	{ Mark Representatives of the neighbors of Str1 for possible change }
+	{ Call this after a call to one or more "low" graph operators }
+	{ Marks points for checking of higher objects }
+		
+	procedure FindAdjMember (memOfAdjToStr1: p2Node {really a p2GOPoint});
+
+		procedure TestForSiblingOfStr1 (pDoc: p2DocInfo; PossMemberOfStr1: p2GOPoint);
+			begin
+				if PossMemberOfStr1^.PtNode = Str1 then
+					begin
+						RequestChange (g, p2GOPoint(memOfAdjToStr1));
+					end;
+			end; {TestForSiblingOfStr1}
+
+		begin {FindAdjMember}
+			{ xxx later: support other graph levels. }
+			EachAdjPoint (pDoc, p2GOPoint(memOfAdjToStr1), TestForSiblingOfStr1);
+		end; {FindAdjMember}
+		
+	procedure RequestRepChange (adjToStr1: p2Node);
+		begin
+			EachElement (adjToStr1, FindAdjMember);
+		end;
+			
+	begin {RequestChanges}
+		if gTraceRequest then
+			begin
+				writeln ('Entering Request Changes: ' );
+				WriteLev (g^.GraphLevel);
+				write (' at ');
+				with pt^ do
+					WritePoint (XCoord, YCoord);
+				if Str1 <> nil then
+					write (' new ', CallComputeHigh 
+						(pDoc, g, Str1, g^.ComputeHigh) );
+				writeln;
+			end;
+		
+		{ xxxx later?
+			if g = point level then
+			go up to string s1,
+				Mark reps of all string adj to s1
+		else for now: support String level only:
+			}
+			
+			RequestChange (g, pt);
+			RequestChange (g^.HighGraph, pt);
+			EachAdjNode (Str1, RequestRepChange)			
+			
+	end; {RequestChanges}

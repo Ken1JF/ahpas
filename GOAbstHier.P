@@ -1,0 +1,256 @@
+{	GOAbstHier		Pascal Unit
+
+	DESCRIPTION
+		GO Abstraction Hierarchy -- Defines:
+			Four/five layered, linear hierarchy of graphs.
+			Coloring functions for nodes at each level.
+			Except Points->Strings coloring function, which is in BoardOps.
+
+	AUTHOR
+			Ken Friedenbach
+			Copyright 1986 
+			All Rights Reserved.
+			
+	BUGS
+
+}
+
+{$I Flags.p} {Global options for compilations}
+
+UNIT GOAbstHier;
+
+INTERFACE
+
+uses 
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	GraphOps, BoardOps, AbstHier, Utilities;
+
+const
+  StringDead = 0;
+	StringAlive = 1;
+	Unknown = 2;
+	{For now, these are the three things that KillString/SaveString can return.}
+	Alive = 3;
+	Dead = 4;
+	Empty = 5;
+	CanKillCanLive = 6;
+	Safe = 7;
+	{The below, plus Safe and Dead, are the things that AtariCapture can return.}
+	Snapback = 8;
+	Ko = 9;
+	illegalMove = 11;
+	CanKillUnknown = 12;
+	UnknownCanLive = 13;
+	
+
+CONST
+		{100-125 No legality or safety needed.}
+	GroupKill = 101; { No! Done by String Analysis }  
+	GroupSave = 102;
+	OpponentKillAnal = 103;
+	FriendSaveAnal = 104;
+	
+	
+	ExtendMoveAnal = 108; { Territory, must be Legal (may not be safe?) }
+	JosekiMoveAnal = 109; { Maybe? on small boards, with "overlapping" corners? }
+	
+	
+		{126-150 Needs only Safety Checks }
+	DefendCutPointAnal = 201; { Safety should be moved to here! (to reduce cost)! }
+	MakeCutPointAnal = 202;
+	DefendConnectStringAnal = 203; { Safety should be moved to here! (to reduce cost)! }
+	MakeConnectStringAnal = 204;
+	
+		{151-200 Needs Legality and Safety Checks }
+
+	DoubleAtariAnal = 205; { YES! BOTH! (Legality being done now.) }
+	SingleAtariAnal = 206;
+	HaneAnal = 207;
+	PressMove = 208;
+
+procedure WriteAnalType (i: integer);
+
+type
+	TStringType = (
+		UnknStrType, { so 0 is not a valid type }
+		BlkLibStr, JntLibStr, WhtLibStr, {Liberty strings, being collected}
+		BlackStonesStr, WhiteStonesStr, {Strings of Stones, with Safety estimate/analysis}
+		CornerTerrStr, { 1. Corners, opening corner Joseki moves }
+		EdgeTerrStr, { 2. middle Edges, early Fuseki edge moves }
+		CornDevTerrStr, { 3. (Big only) near Corner territory, early Joseki continuation moves }
+		CornInfTerrStr, { 4. (Big only) Corner influence, late Fuseki moves }
+		EdgeDevTerrStr, { 5. (Big only) Edge influence, middle game moves }
+		CenterTerrStr { 6. Center points }
+		
+		(* ****
+		EdgeBreakStr ==> EdgeTerrStr, 
+		MidBreakStr, ==> EdgeDevTerrStr
+		EdgeTerrStr, 
+		MidTerrStr,
+		DiagBreak 
+		**** *)
+		); { 12 values = 4 bits }
+		
+const
+		FirstTerrStringType = CornerTerrStr;
+					{ CornerTerrStr is the lowest ordinal territory. }
+
+type		
+	TStonesSafety = (
+		UnknStrSafety, { neighbors not known, yet }
+		EstSafeStr, { currently, ³ 4 liberties }
+		Lib_3_Safety, Lib_2_Safety, Lib_1_Safety, { other static estimates }
+		StonesStrSafe, { cannot be captured, even if attacker goes first }
+		StonesStrDead, { cannot be saved, even if defender goes first }
+		StonesStrUnsettled, { capture or rescue depends on who moves first }
+		StonesStrTooComplex { beyond the resolution of the current situation and algorithms }
+		); {  9 values = 4 bits} { xxx 8 = 3 bits!}
+		
+	TAnalysisResult = (
+		NoAnalysis,
+		CanCapture, 	{ attacker, moving first, can capture }
+		CanSave, 		{ defender, moving first, can save from capture }
+		MakeKo,			{ attacker/defender, moving first, can create a Ko }
+		MakeKoTwo,		{ attacker/defender, moving first, can create a 2-stage Ko }
+		MakeKoThree,	{ attacker/defender, moving first, can create a 3-stage Ko }
+			{ xxx other kinds of Ko's, especially for Japanese Rules: triple Ko, eternal Ko, etc. }
+		MakeSeki,		{ attacker/defender, moving first, can create Seki }
+		CanNotTell		{ attacker/defender, moving first, is too complex to read }
+		); {  8 values (+ more in future) = 4 bits }
+		
+	StringHighState =
+		packed record
+		case Boolean of
+			true: (
+				StrDefend, 
+				StrAttack: 	TAnalysisResult;
+				StrSafety: 	TStonesSafety;
+				StrTyp: 		TStringType;
+			);
+			false: (
+				StrStateInt: integer;
+			)
+		end; {StringHighState}
+		
+	TBlockType = (
+		UnknBlockType, { so 0 is not a valid type }
+		DisputedGroup, {Liberties lying between two groups.}
+		BlackGroup, WhiteGroup, {Block of Stones}
+		CornerTerrBlock, CornerDevBlock, EdgeTerrBlock, MidTerrBlock 
+		); 
+		
+const
+	FirstTerrBlock = CornerTerrBlock; { first ordinal Territory Block }
+
+type
+		
+	TBlockLifeDeath = (
+		UnknBlockSafety, { neighbors not known, yet }
+		EstSafeBlock { currently, ??? }
+		); 
+				
+	BlockHighState =
+		packed record
+		case Boolean of
+			true: (
+				BlockDefend, 
+				BlockAttack: 	TAnalysisResult;
+				BlockSafety: 	TBlockLifeDeath;
+				BlockTyp: 		TBlockType;
+			);
+			false: (
+				BlockStateInt: integer;
+			)
+		end; {BlockHighState}
+	
+	TGroupType = (
+		UnknGroupType, { so 0 is not a valid type }
+		DisputedArea, {Territory between two opposite groups.}
+		BlackArea, WhiteArea, {Groups == Stones, Prisoners, territory.}
+		CornerArea, OpenArea 
+		); 
+
+	GroupHighState =
+		packed record
+		case Boolean of
+			true: (
+				GroupDefend, 
+				GroupAttack: 	TAnalysisResult;  {xxx ???}
+				GroupSafety: 	TBlockLifeDeath;  {xxx ???}
+				GroupTyp: 		TGroupType;
+			);
+			false: (
+				GroupStateInt: integer;
+			)
+		end; {GroupHighState}
+
+(* ****
+const	
+		{ Influenced, Enclosed, and Owned Strings }
+		
+	DispGrpStr = 1;
+	OpenGrpStr = 2;
+
+	BlkInflGrpStr = 3;
+	BlkEnclGrpStr = 4;
+	BlkGrpStr = 5;
+	WhtInflGrpStr = 6;
+	WhtEnclGrpStr = 7;
+	WhtGrpStr = 8;
+	*** *)
+	
+
+type
+	p2GOAbstHier = ^TGOAbstHier;
+	TGOAbstHier = record
+		PointGraph:		Graph;
+		StringGraph:	Graph;
+		BlockGraph:		Graph;
+		GroupGraph:		Graph;
+		AreaGraph:		Graph;
+		DocumentInfo:	TDocInfo;
+	end;
+
+function InitGOAbstHier (gH: p2GOAbstHier): p2GOAbstHier;
+{ Called at initial allocation (gH = nil) }
+{ or during dBoard resize, etc. (gH is to be cleared). }
+
+procedure SetGOAbstHierLevel (gH: p2GOAbstHier; newLevel: TGraphLevel);
+{ Called to lower the updating level (prior to Invalidating Analyses) }
+{ and to raise the updating level (prior to Computing a move) }
+
+procedure ClearAbstHier (gH: p2GOAbstHier);
+{ Called at termination, to free chunks of memory, }
+{ or during dBoard resize, etc. (by InitGOAbstHier). }
+
+procedure EachGOGraphNode (g: p2Graph; procedure Visit (p: p2Node));
+{ Visit each active node of graph g. }
+
+procedure EchHierArc (WhichLevel: ChunkList; nodSize: integer;
+		procedure Visit (ptrA: p2Arc));
+		
+{$IFC DebugDraw}
+procedure DrawStrings (g: p2graph; pDoc: p2DocInfo; area: Rect; HasColor: Boolean);
+procedure DrawBlocks (g: p2graph; pDoc: p2DocInfo; area: Rect; HasColor: Boolean);
+procedure DrawGroups (g: p2graph; pDoc: p2DocInfo; area: Rect; HasColor: Boolean);
+procedure DrawAreas (g: p2graph; pDoc: p2DocInfo; area: Rect; HasColor: Boolean);
+{$ENDC}
+
+function CompStrState (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+function CompNewStr   (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+
+function CompBlockState (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+function CompNewBlock   (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+
+function CompGrpState (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+function CompNewGrp(pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+
+function CompAreaState (pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+function CompNewArea(pDoc: p2DocInfo; g: p2Graph; p: p2Node): integer;
+
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I GOAbstHier2.p}
+END.

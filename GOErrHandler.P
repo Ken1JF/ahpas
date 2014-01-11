@@ -1,0 +1,52 @@
+Unit GOErrHandler;
+
+Interface
+
+Uses
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf;
+	{$LOAD}
+
+procedure GOEngineError (msg: str255; errorNum, format: integer);
+
+Implementation
+
+{$S Error}
+procedure InternalError (msg: Str255; ErrValue: integer);
+{ Display a dialog box in response to an internal error. }
+	const
+		InternalErrorDLOG = 120; 
+		okButton = 1;
+	var
+		itemHit : integer;
+		pDialog : DialogPtr;
+		num2: Str255;
+	begin
+		NumToString(ErrValue, num2);
+		ParamText (msg, num2, '', '');
+		pDialog := GetNewDialog (InternalErrorDLOG, 
+			nil, WindowPtr(-1));
+		SetCursor(arrow);
+		repeat 
+			ModalDialog(nil, itemHit)
+		until (itemHit = okButton);
+		
+		CloseDialog(pDialog);
+	end; {InternalError}
+
+procedure GOEngineError (msg: str255; errorNum, format: integer);
+		begin
+			{$IFC qDebug}
+			write ('*** Error ', msg);
+			case format of
+				0: ;
+				1: write (': ', errorNum:1, '.');
+				otherwise
+					write (' <bad format>: ', format: 1);
+			end; {cases}
+			writeln;
+			{$ENDC}
+			InternalError (msg, errorNum);
+		end; {GOEngineError}
+
+end.

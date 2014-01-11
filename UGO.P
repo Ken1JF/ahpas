@@ -1,0 +1,458 @@
+{GO			Pascal Application	
+
+DESCRIPTION
+			GO -- A Macintosh Application to play the game of GO.
+
+AUTHOR
+			Ken Friedenbach
+			Copyright 1986-1988
+			All Rights Reserved.
+			Based on MacApp: an extensible Macintosh Application.
+			Copyright 1984, 1985, 1986 by Apple Computer, Inc.
+}
+
+{ Change History: }
+{  6-Feb-88 Multi-documents, commands, cut-paste. }
+
+{ 13-Jan-87 Start over, merging with Nothing example. }
+{  4-Jan-87 Merge GOPlayer and Units with Conference example. }
+
+{ 26-Sep-86 Added Icons, document types, "AppFile" handling, etc. }
+{  5-Aug-86 Printing to LaserWriter and Imagewriter }
+{ 31-Jul-86 Started with PExamples:Sample.p }
+
+{ Note: INTL marks strings and code that need to be changed }
+{	for full international support. }
+
+{$I Flags.p} {Global options for compilations}
+
+UNIT UGO;
+
+INTERFACE
+
+USES
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD UMacApp.LOAD}
+		UObject, UList, UMacApp,
+	{$LOAD}
+
+	(*
+	AppleTalk,
+	UAppleTalk,
+	*)
+	
+	CursorCtl, (* for spinning cursor, while playing *)
+	
+	UPrinting,
+	UTEView,
+	UDialog,
+	
+	Timers, 
+	GraphOps, BoardOps, AbstHier, GOAbstHier, GOBoards, StringKill, GOMover;
+
+CONST 
+	
+	{ resource related constants }
+
+{	-	-	-	-	-	-	-	Application and Document types -	-	-	-	-	-	-	-	-	}
+
+	kSignature		=	'McGO';
+	kDocKind			=	'TEXT';
+
+{	-	-	-	-	-	-	-	Commands -	-	-	-	-	-	-	-	-	}
+{ Note: numbers are repeated in GO.r and must match. }
+	cActivateBoard   				= 301;			{menu items, Edit menu}
+
+	cb9x9Command   					= 401;			{menu items, Board menu}
+	cb11x11Command 					= 402;
+	cb13x13Command 					= 403;
+	cb19x19Command 					= 404;
+	cnumberCommand  				= 405;
+	clabelCommand  					= 406;
+	cChangeNumbersCommand		= 408;
+	cpartialCommand 				= 407;
+	
+	cPassCommand						= 5998;
+	cCountPrisnorsCommand		= 5999;
+	cTakeBackMoveCommand		= 6000;
+	evenCommand  						= 6001;			{menu items, Play menu}
+	Komi4Command 						= 6002;
+	Komi5Command 						= 6003;
+	handicapCommand 				= 6004;
+	blackPlayCommand				= 6005;
+	whitePlayCommand 				= 6006;
+	cMachinePlayCommand			= 6007;
+	cRePlayCommand					=	6008;
+	cStopReplayCommand			= 6009;
+	cEditJosekiCommand			= 6010;
+	cShowAllJosekiCommand		= 6011;
+
+	ShowCommentaryCommand 	= 8001;			{menu items, Windows menu}
+	ShowDebugCommand  			= 8002;		
+
+	cShowStringsCommand  		= 9001;			{menu items, Debug menu}
+	cShowBlocksCommand  		= 9002;			
+	cShowGroupsCommand  		= 9003;			
+	cShowAreasCommand  			= 9004;
+	cTraceUpdateCommand  		= 9005;
+	cTraceRequestsCommand   = 9006;
+
+{	-	-	-	-	-	-	-	Special Cursors -	-	-	-	-	-	-	-	-	}
+
+	WhiteCursor 						= 256;
+	BlackCursor 						= 255;
+
+TYPE
+
+	DisplayState = 
+		RECORD	
+			{	State of display for an open GO document.
+				xxx Save with document, restore state when the file is opened.}
+				
+			GameState:			TGameState;	{ dynamic state of the document }
+	
+			BoardLoc:				Point;			{ location of the Board window. }
+
+			GameShows:			Boolean; 		{ true if Game window is showing. }
+			GameLoc:				Point;			{ location of the Game record window. }
+			GamePort:				Rect;				{ port for Game window. }
+			GameScrollPos:	integer;		{ scroll position for Game window. }
+
+			StyleShows:			Boolean;  	{ true if Style window is showing. }
+			StyleLoc:				Point;			{ location of the Style window. }
+												
+		END;
+
+
+	TGOApplication = OBJECT (TApplication)
+	
+		PROCEDURE TGOApplication.IGOApplication;
+			{ Initialialize the Application }
+		
+		FUNCTION  TGOApplication.DoMakeDocument (itsCmdNumber: CmdNumber): TDocument; 
+			OVERRIDE;
+			{ Make a new document }
+			
+		{$IFC qDebug}
+		PROCEDURE TGOApplication.IdentifySoftware; OVERRIDE;
+			{ Identify the version of the software }
+		{$ENDC}
+		
+	END; { TGOApplication }
+	
+
+	TGODocument	= OBJECT(TDocument)
+	
+		fdAbstHier: p2GOAbstHier;			{ GO Abstraction Hierarchy state }
+	
+		fdBoardWindow: TWindow;				{ Board window and view }
+		fdBoardView: TBoardView;	
+				
+		{$IFC DebugDraw}
+		fdStringsWindow: TWindow;			{ Strings window and view }
+		fdStringsView: TDebugView;	
+		
+		fdBlocksWindow: TWindow;			{ Blocks window and view }
+		fdBlocksView: TDebugView;	
+
+		fdGroupsWindow: TWindow;			{ Groups window and view }
+		fdGroupsView: TDebugView;	
+
+		fdAreasWindow: TWindow;			{ Areas window and view }
+		fdAreasView: TDebugView;	
+		{$ENDC}
+		
+		fdGameWindow: TGameWindow;		{ Game window and view }
+		fdGameView: TGameView;
+		
+		fdStyleWindow: TDialogWindow;	{ Style window and view }
+		fdStyleDialog: TStyleDialog;
+		
+		fdDisplayState: DisplayState;	{ State of the display of the document }
+
+		fdTextHandle: Handle; 				{ used to Read/Write text representation of doc }
+																	{ xxx would a single global variable do? }
+																	
+		fdBoardInterior:		rect;			{ interior of active Board view, part that can change }
+
+		fdReopening: 	BOOLEAN;				{ true if document being reopened }
+		
+		fdShowStrings: BOOLEAN;				{ true if strings should be shown }
+		fdShowBlocks: BOOLEAN;				{ true if blocks should be shown }
+		fdShowGroups: BOOLEAN;				{ true if blocks should be shown }
+		fdShowAreas: BOOLEAN;		  		{ true if blocks should be shown }
+		
+		fReadyForDebugDrawing: Boolean; { drawing too early }
+		
+		fdStopReplay: integer;				{ used while Playing is false, i.e. replaying }
+		fdReplayList: p2ListItem;			{ list of moves to make during replay }
+		
+		fdWaitingForUser: Boolean;
+		fdHaveMoveToBlink: Boolean;
+		
+		PROCEDURE TGODocument.IGODocument;
+
+		PROCEDURE TGODocument.DoInitialState; OVERRIDE;
+
+		PROCEDURE TGODocument.DoNeedDiskSpace 
+				(VAR dataForkBytes, rsrcForkBytes: LONGINT); OVERRIDE;
+		PROCEDURE TGODocument.DoRead 
+				(aRefNum: INTEGER;  rsrcExists, forPrinting: BOOLEAN); OVERRIDE;
+		PROCEDURE TGODocument.DoWrite 
+				(aRefNum: INTEGER; makingCopy: BOOLEAN); OVERRIDE;
+
+		PROCEDURE TGODocument.Free; OVERRIDE;
+
+		PROCEDURE TGODocument.DoMakeWindows; OVERRIDE;
+		PROCEDURE TGODocument.DoMakeViews (forPrinting: BOOLEAN); OVERRIDE;
+
+		PROCEDURE TGODocument.DoSetupMenus; OVERRIDE;
+		
+		FUNCTION  TGODocument.DoMenuCommand (aCmdNumber: CmdNumber): TCommand; 
+				OVERRIDE;
+		
+		PROCEDURE TGODocument.DoIdle(phase: IdlePhase); OVERRIDE;
+				
+				{ Utility routines }
+		PROCEDURE TGODocument.ResizeBoardWindow (size: integer);
+			{ used to set board size, when reading a file or from menu command }
+			
+		PROCEDURE TGODocument.ResetBoardParameters (nline, nhand: integer);
+			{ used to set board size, handicap, etc. when reading a file }
+
+		PROCEDURE TGODocument.RedrawBoard;
+			{forces redraw of interior of board window only}
+			
+		PROCEDURE TGODocument.WholeBoardChanged; 
+			{forces redraw of board and its other windows}
+			
+		PROCEDURE TGODocument.DoShowStrings; 
+			{redraw the Strings Graph}
+			
+		PROCEDURE TGODocument.DoShowBlocks; 
+			{redraw the Blocks Graph}
+			
+		PROCEDURE TGODocument.DoShowGroups; 
+			{redraw the Groups Graph}
+			
+		PROCEDURE TGODocument.DoShowAreas; 
+			{redraw the Areas Graph}
+			
+		FUNCTION TGODocument.SetUpForClipBoard : TBoardView; 
+			{Using one document, up for clipboard drawing.}
+			
+	END; {TGODocument}
+
+	TBoardView = OBJECT (TView)
+	
+		fClipPICT: BOOLEAN;		{ true if PICT comments for no LineLayout should be generated }
+
+		fGODocument: TGODocument;
+		
+		fHaveMoveToBlink: Boolean;
+		fWhereToBlink: rect;
+		fBlinkIsInverted: Boolean;
+		fBlinkedTicks: longint;
+
+		PROCEDURE TBoardView.Draw (area: Rect); OVERRIDE;
+		FUNCTION  TBoardView.DoSetCursor (localPoint: Point): BOOLEAN; OVERRIDE;
+		
+		PROCEDURE TBoardView.IBoardView (forClipBoard: Boolean; 
+								itsGODocument: TGODocument);
+
+		FUNCTION  TBoardView.DoMouseCommand (VAR downLocalPoint: Point; 
+								VAR Info: EventInfo; VAR hysteresis: Point): TCommand; OVERRIDE;
+
+		PROCEDURE TBoardView.WriteToDeskScrap; OVERRIDE;
+
+		PROCEDURE TBoardView.DoSetupMenus; OVERRIDE;
+		
+		FUNCTION  TBoardView.DoMenuCommand (aCmdNumber: CmdNumber): TCommand; OVERRIDE;
+		
+		PROCEDURE TBoardView.DoIdle (phase: IdlePhase); OVERRIDE;
+		
+		PROCEDURE TBoardView.DoMakeMove (downLocalPoint: Point; doPass: Boolean);
+		PROCEDURE TBoardView.DoJosekiMove (placePoint: p2GOPoint);
+
+	(* ***
+		FUNCTION  TBoardView.DoKeyCommand (ch: Char; aKeyCode: INTEGER; 
+								VAR info: EventInfo): TCommand; OVERRIDE;
+	*** *)
+			
+	END; {TBoardView}
+	
+	
+	
+	TGameView = OBJECT (TView)
+	
+		fGODocument: TGODocument;
+		
+		PROCEDURE TGameView.Draw (area: Rect); OVERRIDE;
+		
+		PROCEDURE TGameView.IGameView (forClipBoard: Boolean; 
+								itsGODocument: TGODocument);
+
+		(* ***
+
+		FUNCTION  TGameView.DoMouseCommand (VAR downLocalPoint: Point; 
+								VAR Info: EventInfo; VAR hysteresis: Point): TCommand; OVERRIDE;
+
+		all commands handled at the Application level, for now:
+		FUNCTION TGameView.DoMenuCommand (aCmdNumber: CmdNumber): TCommand; OVERRIDE;
+
+		FUNCTION  TGameView.DoKeyCommand (ch: Char; aKeyCode: INTEGER; 
+								VAR info: EventInfo): TCommand; OVERRIDE;
+			*** *)
+	END; {TGameView}
+	
+{$IFC DebugDraw}
+	TDebugViewType = (StringsDebugView, BlocksDebugView, GroupsDebugView, AreasDebugView);
+	
+	TDebugView = OBJECT (TView)
+	
+		fGODocument: TGODocument;
+		
+		fDebugType: TDebugViewType;
+		
+		PROCEDURE TDebugView.Draw (area: Rect); OVERRIDE;
+		
+		PROCEDURE TDebugView.DoSetupMenus; OVERRIDE;
+		
+		FUNCTION  TDebugView.DoMenuCommand (aCmdNumber: CmdNumber): TCommand; OVERRIDE;
+		
+		PROCEDURE TDebugView.WriteToDeskScrap; OVERRIDE;
+
+		PROCEDURE TDebugView.IDebugView (forClipBoard: Boolean; 
+								itsGODocument: TGODocument;
+								itsViewType: TDebugViewType);
+
+	END; {TDebugView}
+{$ENDC}
+	
+
+	TStyleDialog = OBJECT (TDialogView)
+	
+		fvGODocument:	TGODocument;
+
+		PROCEDURE TStyleDialog.IStyleDialog (itsGODocument: TGODocument);
+			{Initialize the Style dialog}
+			
+		FUNCTION  TStyleDialog.DoItemSelected (anItem: INTEGER;
+											  VAR handledIt: BOOLEAN;
+											  VAR doneWithDialog: BOOLEAN):
+											  TCommand; OVERRIDE;
+			{React properly when an item in the dialog is selected}
+			
+	END; {TStyleDialog}
+	
+	
+	TGameWindow = OBJECT(TWindow)
+
+		PROCEDURE TGameWindow.IGameWindow(itsWmgrWindow: WindowPtr;
+											itsGODocument: TGODocument);
+			{Initialize the Game window}
+			
+		PROCEDURE TGameWindow.GetResizeLimits(VAR sizeRect: Rect); OVERRIDE;
+			{Constrain the size which can be set for the window}
+			
+		END;
+
+
+	TGameTracker = OBJECT(TCommand)  {Tracks the mouse within the GO Game window}
+
+		fGameView: 	TGameView;
+
+		PROCEDURE TGameTracker.IGameTracker(itsGameView: TGameView;
+											  itsPieceNumber: integer {xxx what is this?});
+			{Initialize the Game tracker}
+			
+		PROCEDURE TGameTracker.TrackConstrain(anchorPoint,
+											   previousPoint: Point;
+											   VAR nextPoint: Point); OVERRIDE;
+			{Constrains the mouse when tracking in the Game window}
+			
+		PROCEDURE TGameTracker.TrackFeedback(anchorPoint, nextPoint: Point;
+											turnItOn, mouseDidMove: BOOLEAN);
+																	OVERRIDE;
+			{Provides feedback when tracking in the Game window}
+			
+		FUNCTION  TGameTracker.TrackMouse(aTrackPhase: TrackPhase;
+						VAR anchorPoint, previousPoint, nextPoint: Point;
+						mouseDidMove: BOOLEAN): TCommand; OVERRIDE;
+			{Handle mouse tracking in the Game window}
+			
+		END;
+
+
+	TGOMoveType = (MoveType, PassType, HandicapType, SizeType);
+	
+	TMoveCommand = OBJECT (TCommand)
+	
+		fcGODocument:	TGODocument;
+		
+		fCommandType: TGOMoveType;
+		
+		fOldBoardSize: integer;
+		fOldHandicap: integer;
+		fOldTerms: TGameTerms;
+		fOldRules: TGameRules;
+		
+		fNewBoardSize: integer;
+		fNewHandicap: integer;
+		fNewTerms: TGameTerms;
+		fNewRules: TGameRules;
+		
+		PROCEDURE TMoveCommand.IMoveCommand;
+		PROCEDURE TMoveCommand.DoIt; OVERRIDE;
+		PROCEDURE TMoveCommand.RedoIt; OVERRIDE;
+		PROCEDURE TMoveCommand.UndoIt; OVERRIDE;
+	END; {TMoveCommand}
+	
+	TBoardCopyCommand = OBJECT(TCommand)
+
+		fBoardView: 		TBoardView;
+		fBoardDocument: TGODocument;
+
+		PROCEDURE TBoardCopyCommand.IBoardCopyCommand
+								(itsCmdNumber: CmdNumber;
+								 itsBoardView: TBoardView);
+
+		PROCEDURE TBoardCopyCommand.DoIt; OVERRIDE;
+
+		PROCEDURE TBoardCopyCommand.RedoIt; OVERRIDE;
+		PROCEDURE TBoardCopyCommand.UndoIt; OVERRIDE;
+
+	(* ***
+		PROCEDURE TBoardCopyCommand.Commit; OVERRIDE;
+		*** *)
+
+		END;
+
+	TDebugCopyCommand = OBJECT(TCommand)
+
+		fDebugView: 		TDebugView;
+		fDebugDocument: TGODocument;
+
+		PROCEDURE TDebugCopyCommand.IDebugCopyCommand
+								(itsCmdNumber: CmdNumber;
+								 itsDebugView: TDebugView);
+
+		PROCEDURE TDebugCopyCommand.DoIt; OVERRIDE;
+
+		PROCEDURE TDebugCopyCommand.RedoIt; OVERRIDE;
+		PROCEDURE TDebugCopyCommand.UndoIt; OVERRIDE;
+
+	(* ***
+		PROCEDURE TDebugCopyCommand.Commit; OVERRIDE;
+		*** *)
+
+		END;
+
+
+IMPLEMENTATION
+
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I UGO.inc1.p}
+
+END.

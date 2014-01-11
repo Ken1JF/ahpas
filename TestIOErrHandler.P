@@ -1,0 +1,27 @@
+Unit TestIOErrHandler;
+
+Interface
+
+Uses
+	{$LOAD MacIntf.LOAD}
+		MemTypes;
+	{$LOAD}
+
+procedure GOEngineError (msg: str255; errorNum, format: integer);
+
+Implementation
+
+procedure GOEngineError (msg: str255; errorNum, format: integer);
+		begin
+			write ('*** Error ', msg);
+			case format of
+				0: ;
+				1: write (': ', errorNum:1, '.');
+				otherwise
+					write (' <bad format>: ', format: 1);
+			end; {cases}
+			writeln;
+		end; {Error}
+
+end.
+

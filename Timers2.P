@@ -1,0 +1,100 @@
+
+	var 
+		StartTime: longint;
+
+	procedure SetPhaseTimer;
+		begin
+			StartTime := TickCount;
+		end;
+		
+	procedure InitializePhaseTimers;
+		var ph: TimedPhases;
+		begin
+			SetPhaseTimer;
+			for ph := StartPhase to StopPhase do
+				with PhaseTimeRecs [ph] do
+					begin
+						count := 0;
+						minTime := maxlongint;
+						maxTime := 0;
+						totalTime := 0;
+					end;
+		end; 
+
+	procedure EndOfPhase (ph: TimedPhases);
+		var StopTime, Interval: longint;
+		begin
+			StopTime := TickCount;
+			Interval := StopTime - StartTime;
+			with PhaseTimeRecs [ph] do
+				begin
+					if Interval < minTime then
+						minTime := Interval;
+					if Interval > maxTime then
+						maxTime := Interval;
+					totalTime := totalTime + Interval;
+					count := count+1;
+				end;
+			StartTime := StopTime;
+		end; {EndOfPhase}
+	
+	procedure ReportPhaseTimers (var textFile: Text; summaryOnly: Boolean);
+
+		procedure PrintPhaseTime (pht: longint);
+			var min, sec,tick: integer;
+			begin
+				sec := pht div 60;
+				tick := pht - sec*60;
+				min := sec div 60;
+				sec := sec - min*60;
+				write (textFile, min:3, ':', sec:2, '.', (tick + 3) div 6:1);
+			end; {PrintPhaseTime}
+		
+		var ph:TimedPhases; t: longint;
+		begin
+			writeln (textFile, 
+'        Start   User    AnalStr Class1  KillSav Class2  ChkChg  GrpLife TacMov  JosMov  CutConS ExtMov  PickMov Inval   Stop    ');
+	(* ***
+			write (textFile, 'Last  ');
+			for ph := StartPhase to StopPhase do 
+				begin
+					t := PhaseTimeRecs[ph].minTime;
+					if t = maxlongint then
+						t := 0;
+					PrintPhaseTime (t);
+				end;
+		*** *)
+			if not summaryOnly then 
+				begin
+					write (textFile, 'Min   ');
+					for ph := StartPhase to StopPhase do 
+						begin
+							t := PhaseTimeRecs[ph].minTime;
+							if t = maxlongint then
+								t := 0;
+							PrintPhaseTime (t);
+						end;
+					writeln (textFile);
+					write (textFile, 'Avg   ');
+					for ph := StartPhase to StopPhase do 
+						if PhaseTimeRecs[ph].count <> 0 then
+							PrintPhaseTime (PhaseTimeRecs[ph].totalTime 
+													div PhaseTimeRecs[ph].count)
+						else
+							write (textFile, ' ______ ');
+					writeln (textFile);
+					write (textFile, 'Max   ');
+					for ph := StartPhase to StopPhase do 
+						PrintPhaseTime (PhaseTimeRecs[ph].maxTime);
+					writeln (textFile);
+				end;
+			write (textFile, 'TOTAL ');
+			for ph := StartPhase to StopPhase do 
+				PrintPhaseTime (PhaseTimeRecs[ph].totalTime);
+			writeln (textFile);
+			write (textFile, 'Count ');
+			for ph := StartPhase to StopPhase do 
+				write (textFile, PhaseTimeRecs[ph].count:7, ' ');
+			writeln (textFile);
+			
+		end; {ReportPhaseTimers}

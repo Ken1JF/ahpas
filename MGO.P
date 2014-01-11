@@ -1,0 +1,171 @@
+{GO			Pascal Application	
+
+DESCRIPTION
+			GO -- A Macintosh Application to play the game of Go.
+
+AUTHOR
+			Ken Friedenbach
+			Copyright 1986, 1987
+			All Rights Reserved.
+			Based on MacApp, copyright 1986 by Apple Computer, Inc.
+}
+
+{$I Flags.p} {Global options for compilations}
+
+{$SETC doPerform := false} { for including Performance monitoring }
+
+PROGRAM GO;
+
+USES
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD UMacApp.LOAD}
+		UObject, UList, UMacApp,
+	{$LOAD}
+	UPrinting,
+
+	{$IFC doPerform}
+	Perf,
+	{$ENDC}	
+
+	UTEView,
+	UDialog,
+	
+	GraphOps, BoardOps, AbstHier, GOAbstHier, GOBoards, GOMover,
+
+	UGO;
+
+VAR
+	gGOApplication: TGOApplication;
+
+
+	{$IFC qDebug}
+	testNode: TAbstHierNode;
+	{$ENDC}
+
+	{$IFC doPerform}
+	ThePGlobals: TP2PerfGlobals;
+	{$ENDC}	
+
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+
+{$IFC qDebug}
+{$S MADebug }
+procedure writeBooleans (name: Str255; variable: Boolean; value: Boolean);
+	begin
+		write (name, ' ');
+		if variable then
+			write ('TRUE  ')
+		else
+			write ('FALSE ');
+		if variable = value then
+			write ('is     equal to ')
+		else
+			write ('IS NOT EQUAL TO ');
+		if value then
+			writeln ('TRUE  ')
+		else
+			writeln ('FALSE ');
+	end; {writeBooleans}
+{$ENDC}
+	
+{$S ARes}
+PROCEDURE AResDummy;
+
+BEGIN
+END;
+
+{$S ARes2}
+PROCEDURE ARes2Dummy;
+
+BEGIN
+END;
+
+{$S ARes3}
+PROCEDURE ARes3Dummy;
+
+BEGIN
+END;
+
+{$S Main}
+BEGIN
+	InitToolbox (10);
+	InitPrinting;
+	SetResidentSegment(GetSegNumber(@AResDummy), TRUE);
+	SetResidentSegment(GetSegNumber(@ARes2Dummy), TRUE);
+	SetResidentSegment(GetSegNumber(@ARes3Dummy), TRUE);
+
+	New (gGOApplication);
+	gGOApplication.IGOApplication;
+	
+	SmallScreen := screenBits.bounds.bottom <= 420;
+	SetFractEnable (TRUE);
+	
+	{$IFC qDebug}
+	writeln (' Size of PointHighState = ', sizeOf(PointHighState));
+	(* ****
+	if sizeof (TGOPoint) >= sizeof (TNode) then
+		new (testNode.PtRec)
+	else
+		new (testNode.GphRec);
+	with testNode.PtRec^ do
+		begin
+			PtMarked := true;
+			Filler := false;
+				{ point specific information: }
+			RequestCheck [PointsGraphLevel] := true;
+			RequestCheck [StringsGraphLevel] := false;
+			
+		end;
+	with testNode.GphRec^ do
+		begin
+			writeBooleans ('Marked: ',		Marked,				true);
+			writeBooleans ('Filler2: ',		Filler2,			false);
+		end;
+	with testNode.PtRec^ do
+		begin
+			writeBooleans ('PtMarked: ',	PtMarked,			true);
+			writeBooleans ('Filler: ',		Filler,				false);
+		end;
+		**** *)
+	{$ENDC}
+
+	GetFNum ('N Helvetica Narrow', numberFont);
+	
+	{ xxx try Helvetica next???}
+	if numberFont = 0 then
+		numberFont := Courier;
+
+	{$IFC qDebug}
+	(* ***
+	writeln ('Font number for fonts: ', numberFont:1);
+	*** *)
+	{$ENDC}
+
+	{$IFC doPerform}
+		ThePGlobals := nil;
+		if not InitPerf (ThePGlobals, 10{ms}, 2{bytes}, true, true, 'CODE',
+				0, '', true, 0{low RAM}, $4FFFFF{high RAM (5M)}, 16{default}) then
+			begin
+				SysBeep(5); {later: Alert box?}
+				Exit (GO);
+			end;
+
+	if PerfControl (ThePGlobals, True) then {turn on, throw away old state};
+	
+	{$ENDC}	
+
+	gGOApplication.Run;
+
+	SetFractEnable (FALSE);
+	
+	{$IFC doPerform}
+	if PerfControl (ThePGlobals, False) then {turn off, throw away old state};
+
+	if PerfDump (ThePGlobals, 'Perform.out', false, 80) <> 0 then
+				SysBeep(5); {later: Alert box?}
+		
+	TermPerf (ThePGlobals);
+	{$ENDC}	
+
+END.

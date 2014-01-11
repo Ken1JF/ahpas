@@ -1,0 +1,175 @@
+{	GOBoards		Pascal Unit
+
+	DESCRIPTION
+		GOBoards -- Supports dBoard definition, handicaps, placement,
+			rule checking, and drawing.
+
+	AUTHOR
+			Ken Friedenbach
+			Copyright 1986 
+			All Rights Reserved.
+
+BUGS
+1.	Does not support partial boards yet.
+
+IMPROVEMENTS
+1.	Printing on Imagewriter is elongated.  Might improve with slightly
+	smaller dBoxV.
+2.	Courier may not be best font on Imagewriter, Geneva might be better,
+	i.e. be less jaggy.
+3.	Courier may not be best font on Laserwriter, Helvetica might give
+	closer spacing.
+4.	Might be better to do two DrawChar's rather than DrawString.
+}
+
+{$I Flags.p} {Global options for compilations}
+
+UNIT GOBoards;
+
+INTERFACE
+
+USES 
+	{$LOAD MacIntf.LOAD}
+		MemTypes, QuickDraw, OSIntf, ToolIntf, PackIntf,
+	{$LOAD}
+	GraphOps, BoardOps, AbstHier,   
+	{GOGlobal,} GOAbstHier,
+	Utilities; 
+	
+const
+	MaxMoveValues = 100;
+type
+	MoveScoreCard = array [0..MaxMoveValues] of p2ListItem;
+		{ items on the list are p2Analysis }
+
+VAR
+	numberFont: integer;
+	gNoLineLayout: Boolean;	{ controls placing of PicComment for Line layout }
+		{ -	-	-	-	- no Joseki Document -	-	-	-	- }
+	gEmptyTree: TreeNode;
+
+function SetUpGOBoard (gH: p2GOAbstHier; siz: integer; nHand: integer; 
+			forReplay: Boolean): p2GOAbstHier;
+	{ called to re-initialize dBoard size or handicap }
+
+function PlaceStone (var gH: p2GOAbstHier; pt: Point;
+	var changePt: p2GOPoint; GOPointKnown: Boolean;
+			MakingPermanent: Boolean) :integer;
+	{ if GOPointKnown is false, then }
+	{ pt is passed in Local coordinates. }
+	{ returns: }
+	{ 0 and sets drawRect if point was a legal move. }
+	{ 1 if point is off the edge of dBoard. }
+	{ 2 if point is already occupied. }
+	{ 3 if point is illegal suicide move. }
+	{ 4 if point is illegal Ko move. }
+
+procedure UnMakeMove (gH: p2GOAbstHier);
+	{ Undo the last Move (dNextMove-1) }
+	{ Clear the stone }
+	{ Put back any captured stones }
+	{ Reset dKoPoint and dCapStone(?) }
+
+function TryMakeMove (gH: p2GOAbstHier; atPoint: Point; tellUser: Boolean;
+			var changePt: p2GOPoint; GOPointKnown: Boolean;
+			MakingPermanent: Boolean): integer;
+	{ PlaceStone }
+	{ Invalidate for Update }
+	{ Change AbstHier State }
+	{ CheckFor and do Captures }
+	{ Check for adjacent point changes }
+	{ Optional: notify user of any errors }
+	{ returns: same as PlaceStone }
+	
+procedure InvalGOPoint (gH: p2GOAbstHier; x, y: integer);
+	{ invalidate the rectangle at board point x, y }
+	
+procedure HilightGOPoint (r: rect; JosekiValue: TJosekiValue);
+	{ highlight the rectange r }
+
+procedure NilTheAnalysis (gH : p2GoAbstHier; Pnt1: p2Node);
+	{ for permanent moves, returns the AnalysisResult records }
+	{ Handles recent merges, etc. where string might have more than one. }
+	{ However, after called, any dangling pointers will not be safe. }
+	
+function IsJoseki (pDoc: p2DocInfo; root: p2JosekiTreeNode; x, y: integer; 
+				var JosekiOcc: TOccStatus; var JosekiNumber: integer;
+				var JosekiValue: TJosekiValue): Boolean;
+	{ returns true if point x, y is a joseki move }
+	
+		{ The Joseki Transformation Operators: }
+	{ Support rotation, reflection, and scaling to board size }
+	{ Return true if successful, false if scaled point off the board }
+	{ Accept x,y = 0,0 as a pass and returns true }
+
+function JosekiTransform (pDoc: p2DocInfo;  
+				isReflect: Boolean;
+				corn: integer;
+				x, y: integer; 
+				var NewX, NewY: integer): Boolean;
+	{ Transform Board (x,y) coordinates to "canonical" Joseki (NewX, NewY) }
+
+function InverseJosekiTransform (pDoc: p2DocInfo;  
+				isReflect: Boolean;
+				corn: integer;
+				x, y: integer; 
+				var NewX, NewY: integer): Boolean;
+	{ Transform "canonical" Joseki (NewX, NewY) coordinates to Board (x,y) }
+
+procedure RedrawChange (var gH: p2GOAbstHier; p: p2GOPoint; doAdjChk: Boolean);
+	{ Redraw changed point. }
+
+procedure DrawPoint (pDoc: p2DocInfo; x, y: integer; 
+		showJoseki: TShowJoseki; JosekiT: p2JosekiTreeNode;
+		var lastMoveRect: Rect; area: Rect);
+	{ Called for "quick draw" after a user move and before ComputeMove is called }
+	
+procedure DrawBoard (pDoc: p2DocInfo; area: Rect; doClipPICT: Boolean; 
+				showJoseki: TShowJoseki; JosekiT: p2JosekiTreeNode;
+				var lastMoveRect: Rect);
+	{ Called on Update events, Printing, etc. }
+
+
+function WriteGODoc (pDoc: p2DocInfo;
+		var err: integer; var numChars: longint): Handle;
+{ WriteGODoc returns the following values: }
+{ 0		No Error. }
+{ 1		In AddString, PtrAndHand returned error. }
+
+procedure MakeJosekiMove (pDoc: p2DocInfo; placePoint: p2GOPoint;
+				var JTree: TJosekiControl; 
+				corn: integer; isReflect: Boolean);
+{ Update the Joseki Tree to a new state based on a move at placePoint. }
+
+
+function ReadGODoc (gH: p2GOAbstHier; fText: Handle; numChars: longint; 
+		function SetSize (pAbsH: p2GOAbstHier; nLine, hand: integer): p2GOAbstHier): integer;
+{ ReadGODoc return values: }
+{ 0		No Error. }
+{ 1		no '%GO' header. }
+{ 2		not version '1'. }
+{ 3		no '%Terms' for Game. }
+{ 4		expected integer handicap value. }
+{ 5		handicap type not "Stones" "Komi" or "Passes". }
+{ 6		no '%Size'. }
+{ 7		'%Size' value is not 9, 11, 13, or 19 for Game. }
+{ 8		Japanese rules not allowed with "Passes" handicap. }
+{ 9		Chinese rules not allowed with "Stones" handicap. }
+{ 10	'%Rules' value not 'Japanese' or 'Chinese'. }
+{ 11	Move number is incorrect. }
+{ 12	Bad Column, "A" - "T" expected. }	
+{ 13	Bad Column, bigger than dBoard size. }	
+{ 14	Bad Row, integer expected. }	
+{ 15	Bad Row, bigger than dBoard size. }	
+{ 16	Bad Move (100's is the PlaceMove code). }	
+{ 97	no '%EndDiagram'. }
+{ 98	not a Game, Problem, or Joseki. }
+{ 99	no '%EndGame'. }
+
+function ReadInput (var f: text; var numChars: longint; var fText: Handle): Boolean;
+{ simulate a MacApp "Block Read" of entire text file }
+
+IMPLEMENTATION
+{$I Flags2.p} {Reset flags: bug in LOAD mechanism}
+{$I GOBoards2.p}
+END. {GOBoards}
